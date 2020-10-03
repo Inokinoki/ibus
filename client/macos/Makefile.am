@@ -24,7 +24,6 @@ libibus = $(top_builddir)/src/libibus-@IBUS_API_VERSION@.la
 libexec_PROGRAMS = ibus-macos
 
 ibus_macos_SOURCES = \
-    $(protocol_sources) \
     main.mm \
     $(NULL)
 
@@ -38,7 +37,8 @@ ibus_macos_LDADD = \
     $(INPUT_METHOD_KIT) \
     $(NULL)
 
-ibus_macos_CFLAGS = \
+ibus_macos_OBJCXXFLAGS = \
+    $(GIO2_CFLAGS) \
     $(INPUT_METHOD_KIT_CFLAGS) \
     -I$(top_srcdir)/src \
     -I$(top_builddir)/src \

@@ -127,6 +127,8 @@ AC_SUBST(DATE_DISPLAY)
 AC_PROG_CC
 AM_PROG_CC_C_O
 AC_PROG_CC_STDC
+AC_PROG_OBJC
+AC_PROG_OBJCXX
 AM_PROG_VALAC([0.20])
 AC_PROG_INSTALL
 AC_PROG_MAKE_SET
@@ -748,6 +750,7 @@ client/gtk2/Makefile
 client/gtk3/Makefile
 client/x11/Makefile
 client/wayland/Makefile
+client/macos/Makefile
 src/Makefile
 src/ibusversion.h
 src/tests/Makefile
