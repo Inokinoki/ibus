@@ -27,6 +27,10 @@ if ENABLE_UI
 UI_DIR = ui
 endif
 
+if ENABLE_MACOS_UI
+UI_DIR = ui
+endif
+
 if ENABLE_ENGINE
 ENGINE_DIR = engine
 endif

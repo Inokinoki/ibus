@@ -588,6 +588,19 @@ if test x"$enable_ui" = x"yes"; then
     enable_ui="yes (enabled, use --disable-ui to disable)"
 fi
 
+# --enable-macos-ui
+AC_ARG_ENABLE(ui,
+    AS_HELP_STRING([--enable-macos-ui],
+                   [Enable ibus default user interface for macOS]),
+    [--enable-macos-ui=$enableval],
+    [--enable-macos-ui=no]
+)
+AM_CONDITIONAL([ENABLE_MACOS_UI], [test x"$--enable-macos-ui" = x"yes"])
+if test x"$--enable-macos-ui" = x"no"; then
+    # Check on macOS
+    enable_macos_ui="no (disabled, use --enable-macos-ui to enable)"
+fi
+
 # --disable-engine
 AC_ARG_ENABLE(engine,
     AS_HELP_STRING([--disable-engine],
@@ -775,6 +788,7 @@ ibus/Makefile
 ibus/interface/Makefile
 ui/Makefile
 ui/gtk3/Makefile
+ui/macospanel/Makefile
 setup/Makefile
 bindings/Makefile
 bindings/pygobject/Makefile
@@ -813,6 +827,7 @@ Build options:
   Build vala binding            $enable_vala
   Build document                $enable_gtk_doc
   Build UI                      $enable_ui
+  Build UI for macOS            $enable_macos_ui
   Build engine                  $enable_engine
   Enable key snooper            $enable_key_snooper
   No snooper regexes            "$NO_SNOOPER_APPS"

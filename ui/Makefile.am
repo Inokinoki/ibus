@@ -24,8 +24,13 @@ if ENABLE_GTK3
 GTK3_UI = gtk3
 endif
 
+if ENABLE_MACOS_UI
+MACOS_UI = macospanel
+endif
+
 SUBDIRS = \
 	$(GTK3_UI) \
+	$(MACOS_UI) \
 	$(NULL)
 
 -include $(top_srcdir)/git.mk
