@@ -42,6 +42,11 @@ ibus_ui_macos_LDADD = \
     $(INPUT_METHOD_KIT) \
     $(NULL)
 
+ibus_ui_macos_LDFLAGS = \
+    -framework Cocoa \
+    -framework AppKit \
+    $(NULL)
+
 ibus_ui_macos_OBJCXXFLAGS = \
     $(GIO2_CFLAGS) \
     $(INPUT_METHOD_KIT_CFLAGS) \
