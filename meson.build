@@ -48,6 +48,7 @@ pkgdatadir = get_option('prefix') / get_option('datadir') / meson.project_name()
 ibus_log_domain = 'IBUS'
 gettext_package = 'ibus10'
 endian = host_machine.endian()
+is_darwin = host_machine.system() == 'darwin'
 
 if get_option('socket-dir') == ''
   if target_machine.system() == 'linux'
@@ -126,11 +127,17 @@ else
 endif
 
 enable_gtk3 = get_option('gtk3')
+enable_gdk3_wayland = false
 if enable_gtk3
-  gtk3_dep = dependency('gtk+-3.0', version: '>= 3.12.0')
+  gtk3_dep = dependency('gtk+-3.0', version: '>= 3.12.0',
+                        required: not is_darwin)
+  enable_gtk3 = gtk3_dep.found()
+endif
+if enable_gtk3
   gtk_dep = gtk3_dep
   gdk3_x11_dep = dependency('gdk-x11-3.0', required: false)
   gdk3_wayland_dep = dependency('gdk-wayland-3.0', required: false)
+  enable_gdk3_wayland = gdk3_wayland_dep.found()
 
   if get_option('gtk3-im-module-dir') != ''
     gtk3_im_module_dir = get_option('gtk3-im-module-dir')
@@ -140,15 +147,15 @@ if enable_gtk3
         'gtk-3.0' / gtk3_binary_version / 'immodules'
   endif
 else
-  if get_option('ui')
-    error('UI option requires GTK3')
-  endif
   gtk3_im_module_dir = ''
 endif
 
 enable_gtk4 = get_option('gtk4')
 if enable_gtk4
-  gtk4_dep = dependency('gtk4')
+  gtk4_dep = dependency('gtk4', required: not is_darwin)
+  enable_gtk4 = gtk4_dep.found()
+endif
+if enable_gtk4
   gtk_dep = gtk4_dep
   if get_option('gtk4-im-module-dir') != ''
     gtk4_im_module_dir = get_option('gtk4-im-module-dir')
@@ -223,6 +230,7 @@ endif
 pygobject_dep = dependency('pygobject-3.0', version: '>= 3.0.0',
                            required: false)
 enable_pygobject = pygobject_dep.found()
+pyoverridesdir = ''
 if enable_pygobject
   pyoverridesdir = get_option('python-overrides-dir')
   if pyoverridesdir == ''
@@ -260,11 +268,14 @@ endif
 # libnotify
 enable_libnotify = get_option('libnotify')
 if enable_libnotify
-  libnotify_dep = dependency('libnotify', version: '>= 0.7')
+  libnotify_dep = dependency('libnotify', version: '>= 0.7',
+                             required: enable_gtk3)
+  enable_libnotify = libnotify_dep.found()
 endif
 
 # AppIndicator
-if get_option('appindicator')
+enable_appindicator = get_option('appindicator') and enable_gtk3
+if enable_appindicator
   # dependency('dbusmenu-glib-0.4', method: 'pkg-config') searches pkg-config
   # files but it's expanded to '--pkg dbusmenu-glib-0.4' with
   # executable('ibus-ui-gtk3'). However dbusmenu-glib does not provide VAPI
@@ -348,6 +359,25 @@ config_h_inc = include_directories('.')
 
 add_project_arguments('-DHAVE_CONFIG_H', language: 'c')
 
+macos_im_opt = get_option('macos-im')
+enable_macos_im = macos_im_opt.enabled() or (macos_im_opt.auto() and is_darwin)
+macos_ui_opt = get_option('macos-ui')
+enable_macos_ui = macos_ui_opt.enabled() or (macos_ui_opt.auto() and is_darwin)
+
+if get_option('ui') and not enable_gtk3
+  if is_darwin
+    warning('GTK3 panel UI disabled because gtk+-3.0 was not found')
+  else
+    error('UI option requires GTK3')
+  endif
+endif
+
+if enable_macos_im or enable_macos_ui
+  add_languages('objc', native: false, required: true)
+  add_project_arguments('-DHAVE_CONFIG_H', language: 'objc')
+  add_project_arguments('-fobjc-arc', language: 'objc')
+endif
+
 # Subdirectories
 #-------------------------------------------------
 subdir('src')
@@ -361,7 +391,7 @@ subdir('po')
 if get_option('engine')
   subdir('engine')
 endif
-if get_option('ui')
+if (get_option('ui') and enable_gtk3) or enable_macos_ui
   subdir('ui')
 endif
 subdir('tools')
@@ -404,9 +434,10 @@ summary({
   'Build gtk4 immodule':           enable_gtk4,
   'Build XIM agent server':        enable_xim,
   'Build wayland support':         enable_wayland,
-  'Build gdk3 wayland support':    enable_gtk3 ?
-                                     gdk3_wayland_dep.found() : false,
-  'Build appindicator support':    get_option('appindicator'),
+  'Build gdk3 wayland support':    enable_gdk3_wayland,
+  'Build appindicator support':    enable_appindicator,
+  'Build macOS IM client':         enable_macos_im,
+  'Build macOS panel UI':          enable_macos_ui,
   'Build memconf modules':         enable_memconf,
   'Build dconf modules':           enable_dconf,
   'Build introspection':           enable_introspection,

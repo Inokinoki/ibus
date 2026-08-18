@@ -41,6 +41,11 @@
 #include <grp.h>
 #endif
 
+#ifdef __APPLE__
+#include <time.h>
+#include <uuid/uuid.h>
+#endif
+
 static gchar *_display = NULL;
 
 const gchar *
@@ -58,8 +63,19 @@ ibus_get_local_machine_id (void)
                                   &machine_id,
                                   NULL,
                                   NULL)) {
-            g_warning ("Unable to load /var/lib/dbus/machine-id: %s", error->message);
-            machine_id = "machine-id";
+#ifdef __APPLE__
+            uuid_t uuid;
+            struct timespec ts = { 0, 0 };
+            if (gethostuuid (uuid, &ts) == 0) {
+                machine_id = g_malloc0 (37);
+                uuid_unparse_lower (uuid, machine_id);
+            } else
+#endif
+            {
+                g_warning ("Unable to load /var/lib/dbus/machine-id: %s",
+                           error ? error->message : "unknown");
+                machine_id = "machine-id";
+            }
         }
         else {
             g_strstrip (machine_id);

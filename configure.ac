@@ -49,6 +49,7 @@ AC_INIT([ibus], [ibus_version],
 
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
+AC_CANONICAL_HOST
 
 m4_define([ibus_abi_current_minus_age],
           [m4_eval(ibus_abi_current - ibus_abi_age)])
@@ -134,6 +135,7 @@ AM_PROG_VALAC([0.20])
 AC_PROG_INSTALL
 AC_PROG_MAKE_SET
 AX_PROG_CC_FOR_BUILD
+AC_PROG_OBJC
 
 # i18n stuff
 AM_GNU_GETTEXT_VERSION([0.19.8])
@@ -746,6 +748,40 @@ if test x"$enable_ui" = x"yes"; then
     enable_ui="yes (enabled, use --disable-ui to disable)"
 fi
 
+# --enable-macos-im / --enable-macos-ui
+case "$host_os" in
+    darwin*)
+        enable_macos_default=yes
+        ;;
+    *)
+        enable_macos_default=no
+        ;;
+esac
+AC_ARG_ENABLE(macos-im,
+    AS_HELP_STRING([--enable-macos-im],
+                   [Enable macOS InputMethodKit client]),
+    [enable_macos_im=$enableval],
+    [enable_macos_im=$enable_macos_default]
+)
+AC_ARG_ENABLE(macos-ui,
+    AS_HELP_STRING([--enable-macos-ui],
+                   [Enable ibus panel user interface for macOS]),
+    [enable_macos_ui=$enableval],
+    [enable_macos_ui=$enable_macos_default]
+)
+AM_CONDITIONAL([ENABLE_MACOS], [test x"$enable_macos_im" = x"yes"])
+AM_CONDITIONAL([ENABLE_MACOS_UI], [test x"$enable_macos_ui" = x"yes"])
+if test x"$enable_macos_im" = x"yes"; then
+    enable_macos_im="yes (enabled, use --disable-macos-im to disable)"
+else
+    enable_macos_im="no (disabled, use --enable-macos-im to enable)"
+fi
+if test x"$enable_macos_ui" = x"yes"; then
+    enable_macos_ui="yes (enabled, use --disable-macos-ui to disable)"
+else
+    enable_macos_ui="no (disabled, use --enable-macos-ui to enable)"
+fi
+
 if test x"$enable_appindicator" = x"yes"; then
     PKG_CHECK_MODULES(DBUSMENU_GLIB, [dbusmenu-glib-0.4])
     PKG_CHECK_MODULES(DBUSMENU_GTK3, [dbusmenu-gtk3-0.4])
@@ -995,6 +1031,7 @@ client/gtk3/Makefile
 client/gtk4/Makefile
 client/x11/Makefile
 client/wayland/Makefile
+client/macos/Makefile
 conf/Makefile
 conf/dconf/Makefile
 conf/memconf/Makefile
@@ -1027,6 +1064,7 @@ tools/ibus.1
 ui/Makefile
 ui/gtk3/Makefile
 ui/gtk3/ibus-emoji.7
+ui/macospanel/Makefile
 util/Makefile
 util/IMdkit/Makefile
 Makefile
@@ -1066,6 +1104,8 @@ Build options:
   Build vala binding            $enable_vala
   Build document                $enable_gtk_doc
   Build UI                      $enable_ui
+  Build macOS IM client         $enable_macos_im
+  Build UI for macOS            $enable_macos_ui
   Build engine                  $enable_engine
   Enable key snooper            $enable_key_snooper
   No snooper regexes            "$NO_SNOOPER_APPS"

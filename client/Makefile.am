@@ -40,12 +40,17 @@ if ENABLE_WAYLAND
 WAYLAND = wayland
 endif
 
+if ENABLE_MACOS
+MACOS = macos
+endif
+
 SUBDIRS = \
 	$(GTK2) \
 	$(GTK3) \
 	$(GTK4) \
 	$(X11) \
 	$(WAYLAND) \
+	$(MACOS) \
 	$(NULL)
 
 -include $(top_srcdir)/git.mk

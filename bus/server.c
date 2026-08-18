@@ -28,6 +28,12 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <limits.h>
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "dbusimpl.h"
 #include "ibusimpl.h"
@@ -41,17 +47,39 @@ static BusIBusImpl *ibus = NULL;
 static char *address = NULL;
 static gboolean _restart = FALSE;
 
+static gchar *
+bus_get_executable_path (void)
+{
+#ifdef __linux__
+    return g_file_read_link ("/proc/self/exe", NULL);
+#elif defined(__APPLE__)
+    char pathbuf[PATH_MAX];
+    char resolved[PATH_MAX];
+    uint32_t size = sizeof (pathbuf);
+
+    if (_NSGetExecutablePath (pathbuf, &size) != 0)
+        return NULL;
+    if (realpath (pathbuf, resolved) != NULL)
+        return g_strdup (resolved);
+    return g_strdup (pathbuf);
+#else
+    return NULL;
+#endif
+}
+
 static void
 _restart_server (void)
 {
     char *exe;
     int fd;
+#ifdef __linux__
     ssize_t r;
     int MAXSIZE = 0xFFF;
     char proclnk[MAXSIZE];
     char filename[MAXSIZE];
+#endif
 
-    exe = g_file_read_link ("/proc/self/exe", NULL);
+    exe = bus_get_executable_path ();
 
     if (exe == NULL)
         exe = g_strdup (BINDIR "/ibus-daemon");
@@ -61,6 +89,7 @@ _restart_server (void)
         errno = 0;
         /* only close valid fds */
         if (fcntl (fd, F_GETFD) != -1 || errno != EBADF) {
+#ifdef __linux__
             g_sprintf (proclnk, "/proc/self/fd/%d", fd);
             r = readlink (proclnk, filename, MAXSIZE);
             if (r < 0) {
@@ -72,6 +101,9 @@ _restart_server (void)
             if (g_strcmp0 (filename, "anon_inode:inotify") != 0) {
                 close (fd);
             }
+#else
+            close (fd);
+#endif
         }
     }
 
