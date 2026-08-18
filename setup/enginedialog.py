@@ -4,7 +4,7 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2015-2023 Takao Fujiwara <takao.fujiwara1@gmail.com>
 # Copyright (c) 2013-2015 Red Hat, Inc.
 #
 # This program is free software; you can redistribute it and/or
@@ -112,28 +112,47 @@ class EngineDialog(Gtk.Dialog):
             return False
         if self.__filter_word == None:
             return True
+        if row.back:
+            return True
 
-        name = row.name.lower()
-        untrans = row.untrans.lower()
-        if self.__filter_word != None:
-            word = self.__filter_word.lower()
-            if name.startswith(word):
-                return True
-            if untrans.startswith(word):
-                return True
+        words = self.__filter_word.lower().strip().split()
+        if all(word in row.name.lower() for word in words):
+            return True
+        if all(word in row.untrans.lower() for word in words):
+            return True
+        # Search engine name in language list
+        if row.lang_info:
+            if row.name in self.__engines_for_lang.keys():
+                for row_l in self.__engines_for_lang[row.name]:
+                    if all(word in row_l.name.lower() for word in words):
+                        return True
+                    if all(word in row_l.untrans.lower() for word in words):
+                        return True
+        # Search language name in engine list
+        if not row.lang_info:
+            for l in self.__engines_for_lang.keys():
+                if all(word in l.lower() for word in words):
+                    for row_l in self.__engines_for_lang[l]:
+                        if row.name == row_l.name:
+                            return True
+            for (trans, untrans) in self.__untrans_for_lang.items():
+                if all(word in untrans.lower() for word in words):
+                    for row_l in self.__engines_for_lang[trans]:
+                        if row.name == row_l.name:
+                            return True
         return False
 
 
     def __row_activated(self, box, row):
         if row == self.__more_row:
+            # Undo sensitive Gtk.ResponseType.APPLY button
+            self.__list.unselect_row(row)
             self.__show_more()
             return
         if row.back:
-            self.__filter_entry.set_text('')
             self.__show_lang_rows()
             return
         if row.lang_info:
-            self.__filter_entry.set_text('')
             self.__show_engines_for_lang(row)
             return
 
@@ -232,6 +251,7 @@ class EngineDialog(Gtk.Dialog):
         description = i18n.gettext_engine_description(engine)
         row = self.__list_box_row_new(longname)
         row.untrans = engine.get_longname()
+        row.rank = engine.get_rank()
         row.set_tooltip_text(description)
         row.engine = engine
         widget = self.__padded_label_new(longname,
@@ -260,16 +280,13 @@ class EngineDialog(Gtk.Dialog):
         lang = row.name
 
         def cmp_engine(a, b):
-            if a.get_rank() == b.get_rank():
-                a_longname = i18n.gettext_engine_longname(a)
-                b_longname = i18n.gettext_engine_longname(b)
-                return locale.strcoll(a_longname, b_longname)
-            return int(b.get_rank() - a.get_rank())
+            if a.rank == b.rank:
+                return locale.strcoll(a.name, b.name)
+            return int(b.rank - a.rank)
 
         self.__engines_for_lang[lang].sort(
                 key = functools.cmp_to_key(cmp_engine))
-        for e in self.__engines_for_lang[lang]:
-            row = self.__engine_row_new(e)
+        for row in self.__engines_for_lang[lang]:
             self.__list.add(row)
 
 
@@ -288,6 +305,8 @@ class EngineDialog(Gtk.Dialog):
     def __show_more(self):
         self.__set_fixed_size()
         self.__filter_entry.show()
+        # Get focus after clicking on the view-more row:
+        self.__filter_entry.grab_focus_without_selecting()
         self.__showing_extra = True
         self.__list.invalidate_filter()
 
@@ -329,7 +348,8 @@ class EngineDialog(Gtk.Dialog):
             if l not in self.__engines_for_lang:
                 self.__engines_for_lang[l] = []
             i18n.init_textdomain(e.get_textdomain())
-            self.__engines_for_lang[l].append(e)
+            row = self.__engine_row_new(e)
+            self.__engines_for_lang[l].append(row)
 
             # Retrieve Untranslated language names.
             untrans = IBus.get_untranslated_language_name(e.get_language())

@@ -63,14 +63,30 @@ ibus_accelerator_valid (guint           keyval,
                         IBusModifierType modifiers)
 {
     static const guint invalid_accelerator_vals[] = {
-        IBUS_KEY_Shift_L, IBUS_KEY_Shift_R, IBUS_KEY_Shift_Lock,
-        IBUS_KEY_Caps_Lock, IBUS_KEY_ISO_Lock, IBUS_KEY_Control_L,
-        IBUS_KEY_Control_R, IBUS_KEY_Meta_L, IBUS_KEY_Meta_R,
-        IBUS_KEY_Alt_L, IBUS_KEY_Alt_R, IBUS_KEY_Super_L, IBUS_KEY_Super_R,
-        IBUS_KEY_Hyper_L, IBUS_KEY_Hyper_R, IBUS_KEY_ISO_Level3_Shift,
-        IBUS_KEY_ISO_Next_Group, IBUS_KEY_ISO_Prev_Group,
-        IBUS_KEY_ISO_First_Group, IBUS_KEY_ISO_Last_Group,
-        IBUS_KEY_Mode_switch, IBUS_KEY_Num_Lock, IBUS_KEY_Multi_key,
+        /* common keys between invalid_accelerator_vals[] and
+         * IBUS_COMPOSE_IGNORE_KEYLIST[].
+         */
+        IBUS_KEY_Shift_L, IBUS_KEY_Shift_R,
+        IBUS_KEY_Control_L, IBUS_KEY_Control_R,
+        IBUS_KEY_Caps_Lock, IBUS_KEY_Shift_Lock, IBUS_KEY_ISO_Lock,
+        IBUS_KEY_Meta_L, IBUS_KEY_Meta_R,
+        IBUS_KEY_Alt_L, IBUS_KEY_Alt_R,
+        IBUS_KEY_Super_L, IBUS_KEY_Super_R,
+        IBUS_KEY_Hyper_L, IBUS_KEY_Hyper_R,
+        IBUS_KEY_ISO_Level2_Latch,
+        IBUS_KEY_ISO_Level3_Latch, IBUS_KEY_ISO_Level3_Lock,
+        IBUS_KEY_ISO_Level3_Shift,
+        IBUS_KEY_ISO_Level5_Latch, IBUS_KEY_ISO_Level5_Lock,
+        IBUS_KEY_ISO_Level5_Shift,
+        IBUS_KEY_ISO_Group_Latch, IBUS_KEY_ISO_Group_Lock,
+        IBUS_KEY_ISO_Group_Shift,
+        IBUS_KEY_ISO_Next_Group, IBUS_KEY_ISO_Next_Group_Lock,
+        IBUS_KEY_ISO_Prev_Group, IBUS_KEY_ISO_Prev_Group_Lock,
+        IBUS_KEY_ISO_First_Group, IBUS_KEY_ISO_First_Group_Lock,
+        IBUS_KEY_ISO_Last_Group, IBUS_KEY_ISO_Last_Group_Lock,
+        IBUS_KEY_Overlay1_Enable, IBUS_KEY_Overlay2_Enable,
+        /* invalid_accelerator_vals[] specific keys */
+        IBUS_KEY_Num_Lock, IBUS_KEY_Multi_key,
         IBUS_KEY_Scroll_Lock, IBUS_KEY_Sys_Req,
         IBUS_KEY_Tab, IBUS_KEY_ISO_Left_Tab, IBUS_KEY_KP_Tab,
         IBUS_KEY_First_Virtual_Screen, IBUS_KEY_Prev_Virtual_Screen,
@@ -267,14 +283,14 @@ is_keycode (const gchar *string)
  *     modifier mask, %NULL
  *
  * Parses a string representing an accelerator. The format looks like
- * “<Control>a” or “<Shift><Alt>F1” or “<Release>z” (the last one is
- * for key release).
+ * “&lt;Control&gt;a” or “&lt;Shift&gt;&lt;Alt&gt;F1” or “&lt;Release%gt;z”
+ * (the last one is for key release).
  *
  * The parser is fairly liberal and allows lower or upper case, and also
- * abbreviations such as “<Ctl>” and “<Ctrl>”. Key names are parsed using
- * gdk_keyval_from_name(). For character keys the name is not the symbol,
- * but the lowercase name, e.g. one would use “<Ctrl>minus” instead of
- * “<Ctrl>-”.
+ * abbreviations such as “&lt;Ctl&gt;” and “&lt;Ctrl&gt;”. Key names are
+ * parsed using gdk_keyval_from_name(). For character keys the name is not the
+ * symbol, but the lowercase name, e.g. one would use “&lt;Ctrl&gt;minus”
+ * instead of “&lt;Ctrl&gt;-”.
  *
  * If the parse fails, @accelerator_key and @accelerator_mods will
  * be set to 0 (zero).
@@ -403,7 +419,7 @@ out:
  *
  * Converts an accelerator keyval and modifier mask into a string
  * parseable by gtk_accelerator_parse(). For example, if you pass in
- * #IBUS_KEY_q and #IBUS_CONTROL_MASK, this function returns “<Control>q”.
+ * #IBUS_KEY_q and #IBUS_CONTROL_MASK, this function returns “&lt;Control&gt;q”.
  *
  * If you need to display accelerators in the user interface,
  * see gtk_accelerator_get_label().
@@ -468,7 +484,7 @@ ibus_accelerator_name (guint            accelerator_key,
     if (accelerator_mods & IBUS_SUPER_MASK)
         l += sizeof (text_super) - 1;
 
-    accelerator = g_new (gchar, l + 1);
+    g_return_val_if_fail ((accelerator = g_new (gchar, l + 1)), NULL);
 
     accelerator_mods = saved_mods;
     l = 0;

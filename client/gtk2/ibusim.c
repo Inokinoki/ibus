@@ -2,7 +2,7 @@
 /* vim:set et ts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2010 Red Hat, Inc.
+ * Copyright (C) 2008-2020 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -41,9 +41,7 @@ static const GtkIMContextInfo *info_list[] = {
 G_MODULE_EXPORT const gchar*
 g_module_check_init (GModule *module)
 {
-    return glib_check_version (GLIB_MAJOR_VERSION,
-                               GLIB_MINOR_VERSION,
-                               0);
+    return NULL;
 }
 
 G_MODULE_EXPORT void
@@ -77,5 +75,25 @@ im_module_list (const GtkIMContextInfo ***contexts,
 {
     *contexts = info_list;
     *n_contexts = G_N_ELEMENTS (info_list);
+}
+
+G_MODULE_EXPORT const char *
+im_get_context_id (int    *argc,
+                   char ***argv)
+{
+    GtkIMContext *context;
+    char *preedit_string = NULL;
+    PangoAttrList *preedit_attrs = NULL;
+    const char *context_id;
+
+    gtk_init (argc, argv);
+    context = gtk_im_multicontext_new ();
+    gtk_im_context_get_preedit_string (context,
+                                       &preedit_string,
+                                       &preedit_attrs,
+                                       0);
+    context_id = gtk_im_multicontext_get_context_id (
+            GTK_IM_MULTICONTEXT (context));
+    return context_id;
 }
 

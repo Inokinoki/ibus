@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2013 Red Hat, Inc.
+ * Copyright (C) 2022-2024 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2022 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -58,6 +59,20 @@ G_BEGIN_DECLS
 typedef struct _BusIBusImpl BusIBusImpl;
 typedef struct _BusIBusImplClass BusIBusImplClass;
 
+typedef enum
+{
+    ENGINE_FOCUS_CATEGORY_NONE = 0,
+    ENGINE_FOCUS_CATEGORY_NO_ID,
+    ENGINE_FOCUS_CATEGORY_HAS_ID
+} EngineFocusCategory;
+
+typedef enum
+{
+    ENGINE_SURROUNDING_TEXT_CATEGORY_NONE = 0,
+    ENGINE_SURROUNDING_TEXT_CATEGORY_NOT_ACTIVE,
+    ENGINE_SURROUNDING_TEXT_CATEGORY_HAS_ACTIVE
+} EngineSurroundingTextCategory;
+
 GType            bus_ibus_impl_get_type             (void);
 
 /**
@@ -79,8 +94,18 @@ BusComponent    *bus_ibus_impl_lookup_component_by_name
 gboolean         bus_ibus_impl_is_use_sys_layout    (BusIBusImpl        *ibus);
 gboolean         bus_ibus_impl_is_embed_preedit_text
                                                     (BusIBusImpl        *ibus);
+gboolean         bus_ibus_impl_is_use_global_engine (BusIBusImpl        *ibus);
 BusInputContext *bus_ibus_impl_get_focused_input_context
                                                     (BusIBusImpl        *ibus);
-
+GHashTable      *bus_ibus_impl_get_engine_focus_id_table
+                                                    (BusIBusImpl        *ibus);
+GHashTable      *bus_ibus_impl_get_engine_active_surrounding_text_table
+                                                    (BusIBusImpl        *ibus);
+gboolean         bus_ibus_impl_process_key_event    (BusIBusImpl        *ibus,
+                                                     guint               keyval,
+                                                     guint
+                                                                        keycode,
+                                                     guint               state);
+gboolean         bus_ibus_impl_is_wayland_session   (BusIBusImpl        *ibus);
 G_END_DECLS
 #endif

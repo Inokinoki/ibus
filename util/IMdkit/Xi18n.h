@@ -3,7 +3,7 @@
          Copyright (C) 1994-1995 Sun Microsystems, Inc.
          Copyright (C) 1993-1994 Hewlett-Packard Company
          Copyright (C) 2014 Peng Huang <shawn.p.huang@gmail.com>
-         Copyright (C) 2014 Red Hat, Inc.
+         Copyright (C) 2014-2025 Red Hat, Inc.
  
 Permission to use, copy, modify, distribute, and sell this software
 and its documentation for any purpose is hereby granted without fee,
@@ -70,13 +70,6 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define I18N_OPEN	0
 #define I18N_SET	1
 #define I18N_GET	2
-
-typedef struct
-{
-    char        *transportname;
-    int         namelen;
-    Bool        (*checkAddr) ();
-} TransportSW;
 
 typedef struct _XIMPending
 {
@@ -171,6 +164,15 @@ typedef struct _Xi18nClient
 } Xi18nClient;
 
 typedef struct _Xi18nCore *Xi18n;
+
+typedef struct _TransportSW TransportSW;
+
+struct _TransportSW
+{
+    char        *transportname;
+    int         namelen;
+    Bool        (*checkAddr) (Xi18n, TransportSW *, char *);
+};
 
 /*
  * Callback Struct for XIM Protocol

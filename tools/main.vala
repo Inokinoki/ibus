@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -27,16 +27,47 @@ private const string IBUS_SCHEMAS_GENERAL_HOTKEY =
 private const string IBUS_SCHEMAS_PANEL = "org.freedesktop.ibus.panel";
 private const string IBUS_SCHEMAS_PANEL_EMOJI =
         "org.freedesktop.ibus.panel.emoji";
+private const string SYSTEMD_SESSION_GNOME_FILE =
+        "org.freedesktop.IBus.session.GNOME.service";
 
+#if IBUS_WAYLAND
+bool is_wayland_session = false;
+#endif
 bool name_only = false;
 /* system() exists as a public API. */
 bool is_system = false;
 string cache_file = null;
 string engine_id = null;
+bool verbose = false;
+string daemon_type = null;
+string systemd_service_file = null;
+GLib.MainLoop loop = null;
+
 
 class EngineList {
     public IBus.EngineDesc[] data = {};
 }
+
+
+private bool is_kde(bool verbose) {
+    unowned string? desktop = Environment.get_variable("XDG_CURRENT_DESKTOP");
+    if (desktop == "KDE")
+        return true;
+    if (desktop == null || desktop == "(null)")
+        desktop = Environment.get_variable("XDG_SESSION_DESKTOP");
+    if (desktop == "plasma" || desktop == "KDE-wayland")
+        return true;
+    if (desktop == null) {
+        if (verbose) {
+            stderr.printf("XDG_CURRENT_DESKTOP is not exported in your " +
+                          "desktop session.\n");
+        }
+    } else if (verbose) {
+        stderr.printf("Your desktop session \"%s\" is not KDE\n.", desktop);
+    }
+    return false;
+}
+
 
 IBus.Bus? get_bus() {
     var bus = new IBus.Bus();
@@ -44,6 +75,370 @@ IBus.Bus? get_bus() {
         return null;
     return bus;
 }
+
+
+private void
+name_appeared_handler(GLib.DBusConnection connection,
+                      string name,
+                      string name_owner) {
+    if (verbose)
+        stderr.printf("NameAquired %s:%s\n", name, name_owner);
+    loop.quit();
+    loop = null;
+}
+
+
+private void
+kde_virtual_keyboard_avail_cb(GLib.DBusConnection connection,
+                              string?             sender_name,
+                              string              object_path,
+                              string              interface_name,
+                              string              signal_name,
+                              GLib.Variant        parameters)
+{
+    if (verbose) {
+        stderr.printf("%s.%s %s returned.\n",
+                      interface_name, signal_name, object_path);
+    }
+    loop.quit();
+    loop = null;
+}
+
+
+GLib.DBusConnection? get_session_bus(bool verbose) {
+    loop = new GLib.MainLoop();
+    assert(loop != null);
+    GLib.Bus.watch_name (GLib.BusType.SESSION,
+                         DBus.SERVICE_DBUS,
+                         GLib.BusNameWatcherFlags.NONE,
+                         name_appeared_handler,
+                         null);
+    GLib.DBusConnection? connection = null;
+    GLib.Bus.get.begin(GLib.BusType.SESSION, null,
+                           (obj, res) => {
+        try {
+            connection = GLib.Bus.get.end(res);
+            if (verbose)
+                stderr.printf("The session bus is generated.\n");
+        } catch(GLib.IOError e) {
+            if (verbose)
+                stderr.printf("The session bus error: %s\n", e.message);
+            if (loop != null) {
+                loop.quit();
+                loop = null;
+            }
+        }
+    });
+    loop.run();
+    if (connection.is_closed()) {
+        if (verbose)
+            stderr.printf("The session bus is closed.\n");
+        return null;
+    }
+    return connection;
+}
+
+
+string?
+get_ibus_systemd_object_path(GLib.DBusConnection connection,
+                             bool                verbose) {
+    string object_path = null;
+    assert(systemd_service_file != null);
+    try {
+        var variant = connection.call_sync (
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                "GetUnit",
+                new GLib.Variant("(s)", systemd_service_file),
+                new GLib.VariantType("(o)"),
+                GLib.DBusCallFlags.NONE,
+                -1,
+                null);
+        variant.get("(o)", ref object_path);
+        if (verbose) {
+            stderr.printf("Succeed to get an object path \"%s\" for IBus " +
+                          "systemd service file \"%s\".\n",
+                          object_path, systemd_service_file);
+        }
+        return object_path;
+    } catch (GLib.Error e) {
+        if (verbose) {
+            stderr.printf("IBus systemd service file \"%s\" is not installed " +
+                          "in your system: %s\n",
+                          systemd_service_file, e.message);
+        }
+    }
+    return null;
+}
+
+
+bool
+is_running_daemon_via_systemd(GLib.DBusConnection connection,
+                              string              object_path,
+                              bool                verbose) {
+    string? state = null;
+    try {
+        while (true) {
+            var variant = connection.call_sync (
+                    "org.freedesktop.systemd1",
+                    object_path,
+                    "org.freedesktop.DBus.Properties",
+                    "Get",
+                    new GLib.Variant("(ss)",
+                                     "org.freedesktop.systemd1.Unit",
+                                     "ActiveState"),
+                    new GLib.VariantType("(v)"),
+                    GLib.DBusCallFlags.NONE,
+                    -1,
+                    null);
+            GLib.Variant child = null;
+            variant.get("(v)", ref child);
+            state = child.dup_string();
+            if (verbose) {
+                stderr.printf("systemd state is \"%s\" for an object " +
+                              "path \"%s\".\n", state, object_path);
+            }
+            if (state != "activating")
+                break;
+            Posix.sleep(1);
+        }
+    } catch (GLib.Error e) {
+        if (verbose)
+            stderr.printf("%s\n", e.message);
+        return false;
+    }
+    if (state == "active")
+        return true;
+    return false;
+}
+
+
+#if IBUS_WAYLAND
+void registry_global_cb(void       *data,
+                        Wl.Registry wl_registry,
+                        uint32      name,
+                        string     @interface,
+                        uint32      version) {
+    if (verbose) {
+        stderr.printf("Wl.RegistryListenerGlobal name: %3u interface: %s " +
+                      "version: %u.\n", name, interface, version);
+    }
+    if (interface == "zwp_input_method_manager_v2") {
+        is_wayland_session = true;
+    } else if (interface == "zwp_input_method_v1") {
+        stderr.printf("Wayland input-method protocol version 1 does not " +
+                      "work with the forked application.\n");
+        is_wayland_session = true;
+    }
+}
+
+
+void registry_global_remove_cb(void       *data,
+                               Wl.Registry wl_registry,
+                               uint32      name) {
+}
+
+
+bool check_wayland_protocols() {
+    var display = new Wl.Display.connect(null);
+    if (display == null)
+        return false;
+    var registry = display.get_registry();
+    var listener = Wl.RegistryListener() {
+        global = registry_global_cb,
+        global_remove = registry_global_remove_cb
+    };
+    registry.add_listener (listener, null);
+    display.roundtrip();
+    return true;
+}
+
+
+bool start_daemon_in_wayland(bool     restart,
+                             string[] _argv) {
+
+    check_wayland_protocols();
+    if (!is_wayland_session) {
+        if (verbose)
+            stderr.printf("Cannot find the Wayland input-method protocol.\n");
+        return false;
+    }
+
+    var bus = get_bus();
+    if (restart) {
+        if (bus == null) {
+            stderr.printf(_("Can't connect to IBus.\n"));
+            return false;
+        }
+        bus.exit(false);
+        if (verbose) {
+            stderr.printf("Succeed to exit ibus-daemon with an IBus API " +
+                          "directly.\n");
+        }
+        bus = null;
+        Posix.sleep(3);
+    } else if (bus != null) {
+        stderr.printf("%s\n".printf(_("IBus is running.")));
+        Posix.exit(Posix.EXIT_FAILURE);
+        return true;
+    }
+
+    string cmd = Config.LIBEXECDIR + "/ibus-ui-gtk3";
+    var file = File.new_for_path(cmd);
+    if (!file.query_exists())
+        cmd = "../ui/gtk3/ibus-ui-gtk3";
+
+    string daemon_args = "--xim --panel disable";
+    if (_argv.length > 1)
+        daemon_args = string.joinv(" ", _argv[1:]);
+    string[] argv = { cmd };
+    argv += "--enable-wayland-im";
+    argv += "--exec-daemon";
+    argv += "--daemon-args";
+    argv += "%s".printf(daemon_args);
+    if (verbose)
+        argv += "--verbose";
+
+    string[] env = Environ.get();
+
+    try {
+        // Non-blocking
+        Process.spawn_async(null, argv, env,
+                            SpawnFlags.SEARCH_PATH,
+                            null, null);
+    } catch (SpawnError e) {
+        stderr.printf("%s\n", e.message);
+        Posix.exit(Posix.EXIT_FAILURE);
+        return true;
+    }
+    if (verbose) {
+        stderr.printf("Succeed to %s ibus-daemon with a Wayland " +
+                      "input-method version 2.\n",
+                      restart ? "restart" : "start");
+    }
+    return true;
+}
+#endif
+
+
+bool
+start_daemon_with_dbus_systemd(GLib.DBusConnection connection,
+                               bool                restart,
+                               bool                verbose) {
+    string object_path = null;
+    string method = "StartUnit";
+    assert(systemd_service_file != null);
+    if (restart)
+        method = "RestartUnit";
+    try {
+        var variant = connection.call_sync (
+                "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager",
+                method,
+                new GLib.Variant("(ss)", systemd_service_file, "fail"),
+                new GLib.VariantType("(o)"),
+                GLib.DBusCallFlags.NONE,
+                -1,
+                null);
+        variant.get("(o)", ref object_path);
+        if (verbose) {
+            stderr.printf("Succeed to restart IBus daemon via IBus systemd " +
+                          "service file \"%s\": \"%s\"\n",
+                          systemd_service_file, object_path);
+        }
+        return true;
+    } catch (GLib.Error e) {
+        if (verbose) {
+            stderr.printf("Failed to %s IBus daemon via IBus systemd " +
+                          "service file \"%s\": %s\n",
+                          restart ? "restart" : "start",
+                          systemd_service_file, e.message);
+        }
+    }
+    return false;
+}
+
+
+bool
+operate_daemon_with_dbus_kde_real(GLib.DBusConnection connection,
+                                  bool                verbose) {
+    loop = new GLib.MainLoop();
+    assert(loop != null);
+    uint subscripion_id = connection.signal_subscribe(
+            null,
+            "org.kde.kwin.VirtualKeyboard",
+            "availableChanged",
+            "/VirtualKeyboard",
+            null,
+            DBusSignalFlags.NONE,
+            kde_virtual_keyboard_avail_cb);
+
+    string wayland_values = "InputMethod";
+    var bytes = new GLib.VariantBuilder(new GLib.VariantType("ay"));
+    for (int i = 0; i < wayland_values.length; i++) {
+        bytes.add("y", wayland_values.get(i));
+    }
+    var bytes2 = new GLib.VariantBuilder(new GLib.VariantType("aay"));
+    bytes2.add("ay", bytes);
+    var array = new GLib.VariantBuilder(new GLib.VariantType("a{saay}"));
+    array.add("{saay}", "Wayland", bytes2);
+    try {
+        if (!connection.emit_signal(null,
+                                    "/kwinrc",
+                                    "org.kde.kconfig.notify",
+                                    "ConfigChanged",
+                                    new GLib.Variant("(a{saay})", array))) {
+            if (verbose)
+                stderr.printf("Failed to emit a KDE D-Bus signal.\n");
+            connection.signal_unsubscribe(subscripion_id);
+            if (loop != null) {
+                loop.quit();
+                loop = null;
+            }
+            return false;
+        }
+    } catch (GLib.Error e) {
+        stderr.printf("%s\n", e.message);
+        connection.signal_unsubscribe(subscripion_id);
+        if (loop != null) {
+            loop.quit();
+            loop = null;
+        }
+        return false;
+    }
+    // Wait for "/VirtualKeyboard" on "org.kde.kwin.VirtualKeyboard" signal
+    // so that "/kwinrc" on "org.kde.kconfig.notify" signal is reached to
+    // kwin.
+    loop.run();
+    connection.signal_unsubscribe(subscripion_id);
+    return true;
+}
+
+
+bool
+operate_daemon_with_dbus_kde(GLib.DBusConnection connection,
+                             bool                start,
+                             bool                verbose) {
+    if (start) {
+        return operate_daemon_with_dbus_kde_real(connection, verbose);
+    }
+    // Wait for the KeyRelease of Return key.
+    var source = new GLib.TimeoutSource.seconds(1);
+    source.attach();
+    uint id = source.get_id();
+    bool retval = false;
+    source.set_callback(() => {
+        retval = operate_daemon_with_dbus_kde_real(connection, verbose);
+        id = 0;
+        return GLib.Source.REMOVE;
+    });
+    while (id > 0)
+        GLib.MainContext.default().iteration(true);
+    return retval;
+}
+
 
 int list_engine(string[] argv) {
     const OptionEntry[] options = {
@@ -99,6 +494,7 @@ int list_engine(string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
+
 private int exec_setxkbmap(IBus.EngineDesc engine) {
     string layout = engine.get_layout();
     string variant = engine.get_layout_variant();
@@ -149,6 +545,7 @@ private int exec_setxkbmap(IBus.EngineDesc engine) {
     return Posix.EXIT_SUCCESS;
 }
 
+
 int get_set_engine(string[] argv) {
     var bus = get_bus();
     string engine = null;
@@ -182,34 +579,331 @@ int get_set_engine(string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
+
 int message_watch(string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
-int restart_daemon(string[] argv) {
-    var bus = get_bus();
-    if (bus == null) {
-        stderr.printf(_("Can't connect to IBus.\n"));
+
+bool operate_daemon_in_kde_wayland(GLib.DBusConnection connection,
+                                   bool                start,
+                                   bool                verbose) {
+    if (!is_kde(verbose))
+        return false;
+    if (Environment.get_variable("WAYLAND_DISPLAY") == null) {
+        if (verbose)
+            stderr.printf("Your KDE session is not Wayland\n.");
+        return false;
+    }
+    var kwinrc = GLib.Path.build_filename(
+        GLib.Environment.get_user_config_dir(), "kwinrc");
+    var key_file = new KRcFile();
+    try {
+        key_file.load_from_file(kwinrc, GLib.KeyFileFlags.KEEP_COMMENTS);
+    } catch (GLib.KeyFileError e) {
+        stderr.printf("Error in %s: %s\n", kwinrc, e.message);
+        return false;
+    } catch (GLib.FileError e) {
+        stderr.printf("Error in %s: %s\n", kwinrc, e.message);
+        return false;
+    }
+    try {
+        bool is_updated = false;
+        if (start) {
+            string ibus_value =
+                    GLib.Path.build_filename(Config.DATADIR,
+                                             "applications",
+                                             Config.UI_WAYLAND_DESKTOP);
+            string? value = null;
+            if (key_file.has_group("Wayland") &&
+                key_file.has_key("Wayland", "InputMethod[$e]")) {
+                value = key_file.get_value("Wayland", "InputMethod[$e]");
+            }
+            if (value != ibus_value) {
+                key_file.set_value("Wayland", "InputMethod[$e]", ibus_value);
+                key_file.save_to_file(kwinrc);
+                is_updated = true;
+            }
+        } else {
+            if (key_file.has_group("Wayland")) {
+                var keys = key_file.get_keys("Wayland");
+                if (key_file.has_key("Wayland", "InputMethod[$e]")) {
+                    if (keys.length == 1)
+                        key_file.remove_group("Wayland");
+                    else
+                        key_file.remove_key("Wayland", "InputMethod[$e]");
+                    key_file.save_to_file(kwinrc);
+                    is_updated = true;
+                }
+            }
+        }
+        if (verbose) {
+            if (is_updated) {
+                stderr.printf("\"InputMethod\" was %s in kwinrc for %s.\n",
+                              start ? "added" : "deleted",
+                              start ? "start" : "exit");
+            } else {
+                if (start) {
+                    stderr.printf(
+                            "kwinrc is not updated for start. \"ibus exit\" " +
+                            "command may be needed in case kwin_wayland " +
+                            "restarted.\n");
+                } else {
+                    stderr.printf("kwinrc is not updated for exit.\n");
+                    return false;
+                }
+            }
+        // KDE Plasma 6.7 no longer need kwinrc but run ibus-ui-gtk3 directly.
+        } else if (!is_updated && !start) {
+            return false;
+        }
+    } catch (GLib.KeyFileError e) {
+        stderr.printf("%s\n", e.message);
+        return false;
+    } catch (GLib.FileError e) {
+        stderr.printf("%s\n", e.message);
+        return false;
+    }
+    if (!operate_daemon_with_dbus_kde(connection, start, verbose))
+        return false;
+    if (verbose) {
+        stderr.printf("Succeed to %s ibus-daemon with a " +
+                      "KDE Wayland method.\n", start ? "start" : "exit");
+    }
+    return true;
+}
+
+bool start_daemon_with_systemd(bool restart, bool verbose) {
+    GLib.DBusConnection? connection = get_session_bus(verbose);
+    if (connection == null)
+        return false;
+    string? object_path = null;
+    if (restart) {
+        object_path = get_ibus_systemd_object_path(connection, verbose);
+        if (object_path == null)
+            return false;
+        if (!is_running_daemon_via_systemd(connection,
+                                           object_path,
+                                           verbose)) {
+            return false;
+        }
+    }
+    if (!start_daemon_with_dbus_systemd(connection, restart, verbose))
+        return false;
+    // Do not check the systemd state in case of restart because
+    // the systemd file validation is already done and also stopping
+    // daemon and starting daemon take time and the state could be
+    // "inactive" with the time lag.
+    if (restart)
+        return true;
+    object_path = get_ibus_systemd_object_path(connection, verbose);
+    if (object_path == null)
+        return false;
+    if (!is_running_daemon_via_systemd(connection, object_path, verbose))
+        return false;
+    return true;
+}
+
+
+int start_daemon_real(string[] argv,
+                      bool     restart) {
+    const OptionEntry[] options = {
+        { "type", 0, 0, OptionArg.STRING, out daemon_type,
+          N_("Start or restart daemon with \"direct\", \"systemd\", " +
+             "\"kde-wayland\" or \"wayland\" TYPE."),
+          "TYPE" },
+        { "service-file", 0, 0, OptionArg.STRING, out systemd_service_file,
+          N_("Start or restart daemon with SYSTEMD_SERVICE file."),
+          "SYSTEMD_SERVICE" },
+        { "verbose", 0, 0, OptionArg.NONE, out verbose,
+          N_("Show debug messages."), null },
+        { null }
+    };
+
+    var option = new OptionContext();
+    option.add_main_entries(options, Config.GETTEXT_PACKAGE);
+    option.set_ignore_unknown_options(true);
+
+    try {
+        option.parse(ref argv);
+    } catch (OptionError e) {
+        stderr.printf("%s\n", e.message);
         return Posix.EXIT_FAILURE;
     }
-    bus.exit(true);
+    if (daemon_type != null && daemon_type != "direct" &&
+        daemon_type != "systemd" && daemon_type != "kde-wayland" &&
+        daemon_type != "wayland") {
+        stderr.printf("type argument must be \"direct\" or \"systemd\" " +
+                      "or \"kde-wayland\" or \"wayland\"\n");
+        return Posix.EXIT_FAILURE;
+    }
+    if (systemd_service_file == null)
+        systemd_service_file = SYSTEMD_SESSION_GNOME_FILE;
+
+    if (daemon_type == null || daemon_type == "wayland") {
+#if IBUS_WAYLAND
+        if (start_daemon_in_wayland(restart, argv))
+            return Posix.EXIT_SUCCESS;
+#else
+        if (daemon_type == "wayland") {
+            stderr.printf("Please build IBus with Wayland.\n");
+            return Posix.EXIT_FAILURE;
+        }
+#endif
+    }
+
+    if (daemon_type == null || daemon_type == "kde-wayland") {
+        do {
+            GLib.DBusConnection? connection = get_session_bus(verbose);
+            if (connection == null)
+                break;
+            if (restart) {
+                if (operate_daemon_in_kde_wayland(connection, false, verbose))
+                    Posix.sleep(3);
+                else
+                    break;
+            }
+            if (operate_daemon_in_kde_wayland(connection, true, verbose))
+                return Posix.EXIT_SUCCESS;
+        } while (false);
+    }
+
+    if (daemon_type == null || daemon_type == "systemd") {
+        if (start_daemon_with_systemd(restart, verbose))
+            return Posix.EXIT_SUCCESS;
+    }
+
+    if (daemon_type == "systemd" || daemon_type == "kde-wayland")
+        return Posix.EXIT_FAILURE;
+    var bus = get_bus();
+    if (restart) {
+        if (bus == null) {
+            stderr.printf(_("Can't connect to IBus.\n"));
+            return Posix.EXIT_FAILURE;
+        }
+        bus.exit(true);
+        if (verbose) {
+            stderr.printf("Succeed to restart ibus-daemon with an IBus API " +
+                          "directly.\n");
+        }
+    } else if (bus != null) {
+        stderr.printf("%s\n".printf(_("IBus is running.")));
+        return Posix.EXIT_FAILURE;
+    } else {
+        string startarg = "ibus-daemon";
+        argv[0] = startarg;
+        var paths = GLib.Environment.get_variable("PATH").split(":");
+        foreach (unowned string path in paths) {
+            var full_path = "%s/%s".printf(path, startarg);
+            if (GLib.FileUtils.test(full_path, GLib.FileTest.IS_EXECUTABLE)) {
+                startarg = full_path;
+                break;
+            }
+        }
+        // When ibus-daemon is launched by GLib.Process.spawn_async(),
+        // the parent process will be systemd
+        if (verbose) {
+            stderr.printf("Running \"%s\" directly as a foreground " +
+                          "process.\n", startarg);
+        }
+        Posix.execv(startarg, argv);
+    }
     return Posix.EXIT_SUCCESS;
 }
 
+
+int restart_daemon(string[] argv) {
+    return start_daemon_real(argv, true);
+}
+
+int start_daemon(string[] argv) {
+    return start_daemon_real(argv, false);
+}
+
+bool exit_daemon_with_systemd(IBus.Bus bus, bool verbose) {
+    if (systemd_service_file == null)
+        systemd_service_file = SYSTEMD_SESSION_GNOME_FILE;
+    GLib.DBusConnection? connection = get_session_bus(verbose);
+    if (connection == null)
+        return false;
+    string? object_path = get_ibus_systemd_object_path(connection, verbose);
+    if (object_path == null)
+        return false;
+    if (!is_running_daemon_via_systemd(connection,
+                                       object_path,
+                                       verbose)) {
+        return false;
+    }
+
+    // Wait for the KeyRelease of Return key.
+    var source = new GLib.TimeoutSource.seconds(1);
+    source.attach();
+    uint id = source.get_id();
+    source.set_callback(() => {
+        bus.exit(false);
+        id = 0;
+        return GLib.Source.REMOVE;
+    });
+    while (id > 0)
+        GLib.MainContext.default().iteration(true);
+    return true;
+}
+
 int exit_daemon(string[] argv) {
+    const OptionEntry[] options = {
+        { "type", 0, 0, OptionArg.STRING, out daemon_type,
+          N_("Exit daemon with \"direct\" or \"kde-wayland\" " +
+             "TYPE."),
+          "TYPE" },
+        { "verbose", 0, 0, OptionArg.NONE, out verbose,
+          N_("Show debug messages."), null },
+        { null }
+    };
+
+    var option = new OptionContext();
+    option.add_main_entries(options, Config.GETTEXT_PACKAGE);
+    option.set_ignore_unknown_options(true);
+
+    try {
+        option.parse(ref argv);
+    } catch (OptionError e) {
+        stderr.printf("%s\n", e.message);
+        return Posix.EXIT_FAILURE;
+    }
+    if (daemon_type != null && daemon_type != "direct" &&
+        daemon_type != "kde-wayland") {
+        stderr.printf("type argument must be \"direct\" or \"kde-wayland\"\n");
+        return Posix.EXIT_FAILURE;
+    }
+    if (daemon_type == null || daemon_type == "kde-wayland") {
+        GLib.DBusConnection? connection = get_session_bus(verbose);
+        if (connection != null &&
+            operate_daemon_in_kde_wayland(connection, false, verbose)) {
+            return Posix.EXIT_SUCCESS;
+        }
+    }
+
+    if (daemon_type == "kde-wayland")
+        return Posix.EXIT_FAILURE;
     var bus = get_bus();
     if (bus == null) {
         stderr.printf(_("Can't connect to IBus.\n"));
         return Posix.EXIT_FAILURE;
     }
+    if (exit_daemon_with_systemd(bus, verbose))
+        return Posix.EXIT_SUCCESS;
+    if (daemon_type == "systemd")
+        return Posix.EXIT_FAILURE;
     bus.exit(false);
     return Posix.EXIT_SUCCESS;
 }
+
 
 int print_version(string[] argv) {
     print("IBus %s\n", Config.PACKAGE_VERSION);
     return Posix.EXIT_SUCCESS;
 }
+
 
 int read_cache (string[] argv) {
     const OptionEntry[] options = {
@@ -251,6 +945,7 @@ int read_cache (string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
+
 int write_cache (string[] argv) {
     const OptionEntry[] options = {
         { "system", 0, 0, OptionArg.NONE, out is_system,
@@ -283,11 +978,13 @@ int write_cache (string[] argv) {
             Posix.EXIT_SUCCESS : Posix.EXIT_FAILURE;
 }
 
+
 int print_address(string[] argv) {
     string address = IBus.get_address();
     print("%s\n", address != null ? address : "(null)");
     return Posix.EXIT_SUCCESS;
 }
+
 
 private int read_config_options(string[] argv) {
     const OptionEntry[] options = {
@@ -308,6 +1005,7 @@ private int read_config_options(string[] argv) {
     }
     return Posix.EXIT_SUCCESS;
 }
+
 
 private GLib.SList<string> get_ibus_schemas() {
     string[] ids = {};
@@ -342,6 +1040,7 @@ private GLib.SList<string> get_ibus_schemas() {
     return ibus_schemas;
 }
 
+
 int read_config(string[] argv) {
     if (read_config_options(argv) == Posix.EXIT_FAILURE)
         return Posix.EXIT_FAILURE;
@@ -369,6 +1068,7 @@ int read_config(string[] argv) {
 
     return Posix.EXIT_SUCCESS;
 }
+
 
 int reset_config(string[] argv) {
     if (read_config_options(argv) == Posix.EXIT_FAILURE)
@@ -401,6 +1101,7 @@ int reset_config(string[] argv) {
     return Posix.EXIT_SUCCESS;
 }
 
+
 #if EMOJI_DICT
 int emoji_dialog(string[] argv) {
     string cmd = Config.LIBEXECDIR + "/ibus-ui-emojier";
@@ -427,10 +1128,21 @@ int emoji_dialog(string[] argv) {
 }
 #endif
 
+
+int read_im_module(string[] argv) {
+    string? im_module = IBusIMModule.im_module_get_id(argv);
+    if (im_module == null)
+        return Posix.EXIT_FAILURE;
+    print("%s\n".printf(im_module));
+    return Posix.EXIT_SUCCESS;
+}
+
+
 int print_help(string[] argv) {
     print_usage(stdout);
     return Posix.EXIT_SUCCESS;
 }
+
 
 delegate int EntryFunc(string[] argv);
 
@@ -440,12 +1152,14 @@ struct CommandEntry {
     unowned EntryFunc entry;
 }
 
+
 const CommandEntry commands[]  = {
     { "engine", N_("Set or get engine"), get_set_engine },
     { "exit", N_("Exit ibus-daemon"), exit_daemon },
     { "list-engine", N_("Show available engines"), list_engine },
     { "watch", N_("(Not implemented)"), message_watch },
     { "restart", N_("Restart ibus-daemon"), restart_daemon },
+    { "start", N_("Start ibus-daemon"), start_daemon },
     { "version", N_("Show version"), print_version },
     { "read-cache", N_("Show the content of registry cache"), read_cache },
     { "write-cache", N_("Create registry cache"), write_cache },
@@ -453,12 +1167,15 @@ const CommandEntry commands[]  = {
     { "read-config", N_("Show the configuration values"), read_config },
     { "reset-config", N_("Reset the configuration values"), reset_config },
 #if EMOJI_DICT
-    { "emoji", N_("Save emoji on dialog to clipboard "), emoji_dialog },
+    { "emoji", N_("Save emoji on dialog to clipboard"), emoji_dialog },
 #endif
+    { "im-module", N_("Retrieve im-module value from GTK instance"),
+      read_im_module },
     { "help", N_("Show this information"), print_help }
 };
 
 static string program_name;
+
 
 void print_usage(FileStream stream) {
     stream.printf(_("Usage: %s COMMAND [OPTION...]\n\n"), program_name);
@@ -469,6 +1186,7 @@ void print_usage(FileStream stream) {
                       GLib.dgettext(null, commands[i].description));
     }
 }
+
 
 public int main(string[] argv) {
     GLib.Intl.setlocale(GLib.LocaleCategory.ALL, "");

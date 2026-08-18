@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=IBus Desktop Testing Runner
+GenericName=Input Method Desktop Testing Runner
+Comment=Test plugin for IBus Desktop Testing
+Exec=sh -c 'exec @libexecdir@/ibus-desktop-testing-autostart --envcheck --output $HOME/test-autostart.log --result $HOME/test.log --runner gnome --tests ibus'
+Terminal=false
+Type=Application
+Encoding=UTF-8
+Icon=ibus
+Categories=System
+Keywords=im;

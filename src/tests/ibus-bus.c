@@ -527,6 +527,9 @@ finish_set_global_engine_async (GObject *source_object,
                                              res,
                                              &error);
     g_debug ("ibus_bus_set_global_engine_finish: OK");
+    /* anthy not found */
+    if (error)
+        g_error_free (error);
     call_next_async_function ();
 }
 
@@ -802,6 +805,69 @@ start_set_preload_engines_async (void)
             NULL); /* user_data */
 }
 
+typedef struct _ExitAsyncData {
+    gboolean has_socket_path;
+    gboolean exited;
+    guint    timeout_id;
+} ExitAsyncData;
+
+static void
+_socket_changed_cb (GFileMonitor       *monitor,
+                    GFile              *file,
+                    GFile              *other_file,
+                    GFileMonitorEvent   event_type,
+                    ExitAsyncData      *data)
+{
+    switch (event_type) {
+    case G_FILE_MONITOR_EVENT_CHANGED:
+        g_debug ("IBus socket file is changed");
+        call_next_async_function ();
+        data->exited = TRUE;
+        g_signal_handlers_disconnect_by_func (monitor,
+                                              G_CALLBACK (_socket_changed_cb),
+                                              data);
+        if (data->timeout_id)
+            g_source_remove (data->timeout_id);
+        g_object_unref (monitor);
+        break;
+    case G_FILE_MONITOR_EVENT_CREATED:
+        g_debug ("IBus socket file is created");
+        break;
+    case G_FILE_MONITOR_EVENT_DELETED:
+        g_debug ("IBus socket file is deleted");
+        break;
+    default:
+        g_debug ("IBus socket file's status is %d\n", event_type);
+    }
+}
+
+static gboolean
+_exit_timeout (gpointer user_data)
+{
+    g_error ("start_exit_async() is timeout. You might run ibus-daemon " \
+             "with systemd under GNOME and the exit API does not work. " \
+             "You need to export IBUS_DAEMON_WITH_SYSTEMD=1 .\n");
+    return G_SOURCE_REMOVE;
+}
+
+static void
+finish_ibus_restart_async (GPid      pid,
+                           gint      status,
+                           gpointer *user_data)
+{
+    ExitAsyncData *data = (ExitAsyncData *)user_data;
+    g_spawn_close_pid (pid);
+    if (data->has_socket_path == FALSE) {
+        g_debug ("ibus_bus_exit_finish: OK socket file: none");
+        g_usleep (G_USEC_PER_SEC);
+        call_next_async_function ();
+    } else {
+        g_debug ("ibus_bus_exit_finish: OK socket file: monitored");
+        if (!data->exited)
+            data->timeout_id = g_timeout_add_seconds (10, _exit_timeout, NULL);
+    }
+}
+
 static void
 finish_exit_async (GObject *source_object,
                    GAsyncResult *res,
@@ -811,15 +877,32 @@ finish_exit_async (GObject *source_object,
     gboolean result = ibus_bus_exit_async_finish (bus,
                                                   res,
                                                   &error);
+    ExitAsyncData *data = (ExitAsyncData *)user_data;
+    if (error) {
+        g_warning ("Failed to ibus_bus_exit(): %s", error->message);
+        g_error_free (error);
+    }
     g_assert (result);
-    g_debug ("ibus_bus_exit_finish: OK");
-    g_usleep (G_USEC_PER_SEC);
-    call_next_async_function ();
+    g_assert (data);
+    if (data->has_socket_path == FALSE) {
+        g_debug ("ibus_bus_exit_finish: OK socket file: none");
+        g_usleep (G_USEC_PER_SEC);
+        call_next_async_function ();
+    } else {
+        g_debug ("ibus_bus_exit_finish: OK socket file: monitored");
+        if (!data->exited)
+            data->timeout_id = g_timeout_add_seconds (10, _exit_timeout, NULL);
+    }
 }
 
 static void
 start_exit_async (void)
 {
+    static ExitAsyncData data = {
+        .has_socket_path = FALSE,
+        .exited          = FALSE,
+        .timeout_id      = 0
+    };
     /* When `./runtest ibus-bus` runs, ibus-daemon sometimes failed to
      * restart because closing a file descriptor was failed in
      * bus/server.c:_restart_server() with a following error:
@@ -828,12 +911,60 @@ start_exit_async (void)
      * fail to restart ibus-daemon.
      */
     g_usleep (G_USEC_PER_SEC);
-    ibus_bus_exit_async (bus,
-                         TRUE, /* restart */
-                         -1, /* timeout */
-                         NULL, /* cancellable */
-                         finish_exit_async,
-                         NULL); /* user_data */
+    /* IBus socket file can be deleted after finish_exit_async() is called
+     * so the next ibus_bus_new_async() in test_bus_new_async() could be failed
+     * if the socket file is deleted after ibus_bus_new_async() is called
+     * in case that the socket file is not monitored.
+     */
+    if (!g_getenv ("IBUS_ADDRESS")) {
+        const gchar *address_path = ibus_get_socket_path ();
+        GFile *file;
+        GError *error = NULL;
+        GFileMonitor *monitor;
+
+        g_assert (address_path);
+        file = g_file_new_for_path (address_path);
+        g_assert (file);
+        data.has_socket_path = TRUE;
+        monitor = g_file_monitor (file, G_FILE_MONITOR_NONE, NULL, &error);
+        if (error) {
+            g_warning ("Failed to monitor socket file: %s", error->message);
+            g_error_free (error);
+        }
+        g_assert (monitor);
+        g_signal_connect (monitor, "changed",
+                          G_CALLBACK (_socket_changed_cb),
+                          &data);
+        g_object_unref (file);
+    }
+    /* When ibus-daemon runs with systemd, restarting the daemon with
+     * ibus_bus_exit_async() does not work so runs `ibus restart` command
+     * with IBUS_DAEMON_WITH_SYSTEMD variable instead.
+     */
+    if (g_getenv ("IBUS_DAEMON_WITH_SYSTEMD")) {
+        gchar *argv[] = { "ibus", "restart", NULL };
+        GSpawnFlags flags = G_SPAWN_DO_NOT_REAP_CHILD \
+                            | G_SPAWN_SEARCH_PATH \
+                            | G_SPAWN_STDOUT_TO_DEV_NULL \
+                            | G_SPAWN_STDERR_TO_DEV_NULL;
+        GPid pid = 0;
+        GError *error = NULL;
+        g_spawn_async (NULL, argv, NULL, flags, NULL, NULL, &pid, &error);
+        if (error) {
+            g_warning ("Failed to call ibus restart: %s", error->message);
+            g_error_free (error);
+        }
+        g_child_watch_add (pid,
+                           (GChildWatchFunc)finish_ibus_restart_async,
+                           &data);
+    } else {
+        ibus_bus_exit_async (bus,
+                             TRUE, /* restart */
+                             -1, /* timeout */
+                             NULL, /* cancellable */
+                             finish_exit_async,
+                             &data); /* user_data */
+    }
 }
 
 static gboolean

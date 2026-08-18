@@ -1,8 +1,8 @@
 /* -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
- * Copyright (C) 2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2018 Red Hat, Inc.
+ * Copyright (C) 2018-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2018-2021 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -76,11 +76,9 @@ unicode_data_new_object (UnicodeData *data)
             ibus_unicode_data_new ("code",
                                    data->code,
                                    "name",
-                                   data->name ? g_strdup (data->name)
-                                           : g_strdup (""),
+                                   data->name ? data->name : "",
                                    "alias",
-                                   data->alias ? g_strdup (data->alias)
-                                           : g_strdup (""),
+                                   data->alias ? data->alias : "",
                                    NULL);
     data->list = g_slist_append (data->list, unicode);
 }
@@ -98,8 +96,7 @@ unicode_block_new_object (UnicodeData *data)
                                     "end",
                                     data->end,
                                     "name",
-                                    data->name ? g_strdup (data->name)
-                                           : g_strdup (""),
+                                    data->name ? data->name : "",
                                    NULL);
     data->list = g_slist_append (data->list, block);
 }
@@ -144,7 +141,13 @@ ucd_names_list_parse_alias (const gchar *line,
 
     if (*line == '\0')
         return FALSE;
-    data->alias = g_strdup (line);
+    if (data->alias) {
+        gchar *new_alias = g_strdup_printf ("%s;%s", data->alias, line);
+        g_free (data->alias);
+        data->alias = new_alias;
+    } else {
+        data->alias = g_strdup (line);
+    }
     return TRUE;
 }
 
@@ -200,6 +203,7 @@ ucd_names_list_parse_line (const gchar *line,
         }
         data->code = code;
         data->name = name;
+        g_strfreev (elements);
     }
     return TRUE;
 }
@@ -285,7 +289,7 @@ ucd_parse_file (const gchar *filename,
                    filename, error ? error->message : "");
         goto failed_to_parse_ucd_names_list;
     }
-    head = end = content;
+    end = content;
     while (*end == '\n' && end - content < length) {
         end++;
         n++;
@@ -349,9 +353,39 @@ failed_to_parse_ucd_names_list:
 }
 
 static void
+update_license_years (gchar *content)
+{
+    time_t now = time (NULL);
+    GDate *date;
+    guint year;
+    gchar year_buff[5] = { '\0' };
+
+    g_return_if_fail (now != (time_t)-1);
+    date = g_date_new ();
+    g_assert (date != NULL);
+    g_date_set_time_t (date, now);
+    year = date->year;
+    g_date_free (date);
+    g_return_if_fail (year != 0);
+    g_return_if_fail (g_snprintf (year_buff, 5, "%u", year) > 0);
+
+    do {
+        gchar *copyright = g_strstr_len (content, -1, "Copyright (C) ");
+        if (copyright != NULL && *(copyright + 18) == '-') {
+            copyright += 19;
+            memcpy (copyright, year_buff, 4);
+        } else {
+            copyright = NULL;
+        }
+        content = copyright;
+    } while (content != NULL);
+}
+
+static void
 block_list_dump (IBusUnicodeBlock *block,
                  GString          *buff)
 {
+    gchar *line;
     g_return_if_fail (buff != NULL);
 
     g_string_append (buff, "    /* TRANSLATORS: You might refer the "         \
@@ -359,9 +393,10 @@ block_list_dump (IBusUnicodeBlock *block,
                            "                    the following command:\n"     \
                            "       msgmerge -C gucharmap.po ibus.po "         \
                            "ibus.pot */\n");
-    gchar *line = g_strdup_printf ("    N_(\"%s\"),\n",
-                                   ibus_unicode_block_get_name (block));
+    line = g_strdup_printf ("    N_(\"%s\"),\n",
+                            ibus_unicode_block_get_name (block));
     g_string_append (buff, line);
+    g_free (line);
 }
 
 static void
@@ -371,7 +406,7 @@ ucd_block_translatable_save (const gchar *filename,
     gchar *content = NULL;
     gsize length = 0;
     GError *error = NULL;
-    gchar *p;
+    gchar *p, *substr;
     GString *buff = NULL;
     int i;
     GSList *list = blocks_list;
@@ -392,25 +427,31 @@ ucd_block_translatable_save (const gchar *filename,
             break;
     }
     if (p != NULL) {
-        g_string_append (buff, g_strndup (content, p - content));
+        substr = g_strndup (content, p - content);
+        update_license_years (substr);
+        g_string_append (buff, substr);
+        g_free (substr);
         g_string_append_c (buff, '\n');
     }
     g_clear_pointer (&content, g_free);
 
-    g_string_append (buff, g_strdup ("\n"));
-    g_string_append (buff, g_strdup_printf ("/* This file is generated by %s. */", __FILE__));
-    g_string_append (buff, g_strdup ("\n"));
-    g_string_append (buff, g_strdup ("include <glib/gi18n.h>\n"));
-    g_string_append (buff, g_strdup ("\n"));
-    g_string_append (buff, g_strdup ("#ifndef __IBUS_UNICODE_GEN_H_\n"));
-    g_string_append (buff, g_strdup ("#define __IBUS_UNICODE_GEN_H_\n"));
-    g_string_append (buff, g_strdup ("const static char *unicode_blocks[] = {\n"));
+    g_string_append (buff, "\n");
+    substr = g_strdup_printf ("/* This file is generated by %s. */", __FILE__);
+    g_string_append (buff, substr);
+    g_free (substr);
+    g_string_append (buff, "\n");
+    g_string_append (buff, "include <glib/gi18n.h>\n");
+    g_string_append (buff, "\n");
+    g_string_append (buff, "#ifndef __IBUS_UNICODE_GEN_H_\n");
+    g_string_append (buff, "#define __IBUS_UNICODE_GEN_H_\n");
+    g_string_append (buff, "const static char *unicode_blocks[] = {\n");
     g_slist_foreach (list, (GFunc)block_list_dump, buff);
-    g_string_append (buff, g_strdup ("};\n"));
-    g_string_append (buff, g_strdup ("#endif\n"));
+    g_string_append (buff, "};\n");
+    g_string_append (buff, "#endif\n");
 
     if (!g_file_set_contents (filename, buff->str, -1, &error)) {
-        g_warning ("Failed to save emoji category file %s: %s", filename, error->message);
+        g_warning ("Failed to save emoji category file %s: %s",
+                   filename, error->message);
         g_error_free (error);
     }
 
@@ -487,6 +528,7 @@ main (int argc, char *argv[])
     if (output_names_list && names_list)
         ibus_unicode_data_save (output_names_list, names_list);
     g_free (output_names_list);
+    g_slist_free_full (names_list, g_object_unref);
 
     if (input_blocks) {
         ucd_parse_file (input_blocks, &blocks_list, UCD_BLOCKS);
@@ -497,6 +539,8 @@ main (int argc, char *argv[])
     if (output_blocks_trans && blocks_list)
         ucd_block_translatable_save (output_blocks_trans, blocks_list);
     g_free (output_blocks);
+    g_free (output_blocks_trans);
+    g_slist_free_full (blocks_list, g_object_unref);
 
     g_free (unicode_version);
     return 0;

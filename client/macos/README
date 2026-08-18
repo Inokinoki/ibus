@@ -1,0 +1,50 @@
+macOS InputMethodKit client for IBus
+====================================
+
+`ibus-macos` is an experimental Input Method Kit (IMK) client that
+forwards key events from macOS applications to `ibus-daemon` through
+`IBusInputContext`.
+
+Build
+-----
+
+The client is enabled automatically when configuring on Darwin:
+
+    meson setup build
+    meson compile -C build
+
+On other hosts, pass `-Dmacos-im=enabled` (requires an Objective-C
+compiler and the macOS SDK). Typical macOS flags when GTK/X11
+dependencies are not installed:
+
+    meson setup build \
+      -Dgtk3=false -Dgtk4=false -Dui=false \
+      -Dappindicator=false -Dlibnotify=false \
+      -Demoji-dict=false -Dunicode-dict=false \
+      -Dgtk-doc=false -Dsystemd-services=disabled \
+      -Dsetup=false
+
+Install as an input method
+--------------------------
+
+The IMK executable is installed as an application bundle:
+
+    $prefix/libexec/IBus.app
+
+Copy or symlink it into the Input Methods folder, then enable IBus in
+System Settings → Keyboard → Input Sources:
+
+    cp -R $prefix/libexec/IBus.app ~/Library/Input\ Methods/
+    # log out and back in, then add "IBus" as an input source
+
+`ibus-daemon` must be running (for example from a Homebrew prefix)
+before the input method can create an input context.
+
+Architecture
+------------
+
+* `IBusIMController` subclasses `IMKInputController` and maps `NSEvent`
+  key events to IBus keyvals / modifier masks.
+* Preedit is shown as marked text in the client application.
+* Lookup tables and auxiliary text are rendered by `ibus-ui-macos`
+  (`ui/macospanel`), which implements `IBusPanelService`.

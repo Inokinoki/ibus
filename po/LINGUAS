@@ -1,3 +1,5 @@
+# please keep this list sorted alphabetically
+#
 ar
 as
 bg
@@ -7,6 +9,7 @@ ca
 cs
 da
 de
+el
 en_GB
 es
 et
@@ -22,6 +25,9 @@ ia
 id
 it
 ja
+ka
+kab
+kk
 kn
 ko
 lv
@@ -30,11 +36,13 @@ mn
 mr
 nb
 nl
+oc
 or
 pa
 pl
 pt
 pt_BR
+ro
 ru
 sq
 sr

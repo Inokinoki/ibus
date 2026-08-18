@@ -3,8 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2020 Takao Fujiwara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2020 Red Hat, Inc.
+# Copyright (c) 2015-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2026 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -22,20 +22,24 @@
 # USA
 
 
-# If ibus_released is 0, append datestamp to the version number.
-m4_define([ibus_released], [1])
+# If ibus_released is 0, append beta to the version number.
+m4_define([ibus_released], [m4_esyscmd(sh -c '. ./meson.config 2>/dev/null;
+    test "x$IBUS_RELEASED" = "x1" && echo -n 1 || echo -n 0')])
 
 m4_define([ibus_major_version], [1])
 m4_define([ibus_minor_version], [5])
-m4_define([ibus_micro_version], [22])
+m4_define([ibus_micro_version], [35])
+m4_define([ibus_beta_version], [beta1])
 m4_define([ibus_abi_current], [5])
 m4_define([ibus_abi_revision],
           [m4_eval(100 * ibus_minor_version + ibus_micro_version)])
 m4_define([ibus_abi_age], [0])
 m4_define([ibus_maybe_datestamp],
     m4_esyscmd([test x]ibus_released[ != x1 && date +.%Y%m%d | tr -d '\n\r']))
+m4_define([ibus_beta_suffix],
+          m4_if(ibus_released, 0, -ibus_beta_version))
 m4_define([ibus_version],
-    ibus_major_version.ibus_minor_version.ibus_micro_version[]ibus_maybe_datestamp)
+    ibus_major_version.ibus_minor_version.ibus_micro_version[]ibus_beta_suffix)
 m4_define([ibus_api_version], [ibus_major_version.0])
 
 AC_PREFEQ([2.62])
@@ -45,6 +49,7 @@ AC_INIT([ibus], [ibus_version],
 
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIR([m4])
+AC_CANONICAL_HOST
 
 m4_define([ibus_abi_current_minus_age],
           [m4_eval(ibus_abi_current - ibus_abi_age)])
@@ -62,9 +67,9 @@ VALA_TARGET_GLIB_VERSION=2.46
 AC_SUBST(VALA_TARGET_GLIB_VERSION)
 
 # Init automake.
-AM_INIT_AUTOMAKE([1.11.1 parallel-tests])
+AM_INIT_AUTOMAKE([1.11.1 foreign parallel-tests])
 AM_MAINTAINER_MODE([enable])
-AC_GNU_SOURCE
+AC_USE_SYSTEM_EXTENSIONS
 
 # Support silent build rules. Disable
 # by either passing --disable-silent-rules to configure or passing V=1
@@ -126,26 +131,85 @@ AC_SUBST(DATE_DISPLAY)
 # Check for programs.
 AC_PROG_CC
 AM_PROG_CC_C_O
-AC_PROG_CC_STDC
 AM_PROG_VALAC([0.20])
 AC_PROG_INSTALL
 AC_PROG_MAKE_SET
+AX_PROG_CC_FOR_BUILD
+AC_PROG_OBJC
 
 # i18n stuff
 AM_GNU_GETTEXT_VERSION([0.19.8])
 AM_GNU_GETTEXT([external])
 
 # Define PACKAGE_VERSION_* variables.
-AM_DISABLE_STATIC
-AC_ISC_POSIX
-AC_HEADER_STDC
+AC_DISABLE_STATIC([])
+AC_SEARCH_LIBS([strerror],[cposix])
+
 LT_INIT
+
+AC_MSG_CHECKING([for product build])
+# --disable-product-build option.
+AC_ARG_ENABLE(product-build,
+    AS_HELP_STRING([--disable-product-build],
+                   [Disable CFLAGS for the product release]),
+    [enable_product_build="$enableval"],
+    [enable_product_build="auto"]
+)
+if test x"$enable_product_build" = xauto; then
+    if echo ibus_beta_version | grep -q "rc"; then
+        enable_product_build="yes"
+    else
+        enable_product_build="no"
+    fi
+fi
+TEST_CFLAGS="$CFLAGS"
+PRODUCT_CFLAGS="$CFLAGS"
+PRODUCT_LIB_CFLAGS=''
+if test x"$enable_product_build" = xyes; then
+    if test $ac_compiler_gnu = yes; then
+        _CFLAGS="-DG_DISABLE_CAST_CHECKS -Wl,-z,relro -Wl,-z,now $CFLAGS"
+        TEST_CFLAGS="$_CFLAGS"
+        CFLAGS="-DG_DISABLE_ASSERT $_CFLAGS"
+        PRODUCT_CFLAGS="$CFLAGS"
+        PRODUCT_LIB_CFLAGS="-Wl,-Bsymbolic -fno-plt"
+    fi
+    AC_DEFINE(HAVE_PRODUCT_BUILD, 1, [Enable product build])
+fi
+AC_SUBST(PRODUCT_LIB_CFLAGS)
+AC_SUBST(TEST_CFLAGS)
+AC_SUBST(PRODUCT_CFLAGS)
+AC_MSG_RESULT([$enable_product_build])
 
 # Check header filess.
 AC_CHECK_HEADERS([sys/prctl.h])
 
 # Check functions.
-AC_CHECK_FUNCS(daemon)
+AC_CHECK_FUNCS(daemon getgrgid_r)
+
+# Check dlclose() in libc.so.
+AC_CHECK_LIB(c, dlclose, LIBDL="", [AC_CHECK_LIB(dl, dlclose, LIBDL="-ldl")])
+AC_SUBST(LIBDL)
+
+# Check if static build only
+AC_MSG_CHECKING([for IBUS_STATIC_COMPILATION])
+ibus_build_static_only=0
+if test "x$enable_static" = "xyes" -a "x$enable_shared" != "xyes" ; then
+    ibus_build_static_only=1
+    AC_DEFINE(IBUS_STATIC_COMPILATION, $ibus_build_static_only,
+              [Define to build static])
+fi
+AC_MSG_RESULT([$ibus_build_static_only])
+
+# Check if cross compiling.
+AM_CONDITIONAL(CROSS_COMPILING, test "x$cross_compiling" = xyes)
+
+# Check endianness.
+AC_C_BIGENDIAN([ENDIAN=big], [ENDIAN=little], [ENDIAN=unknown], [ENDIAN=big])
+if test x"$ENDIAN" != xlittle  -a x"$ENDIAN" != xbig; then
+    AC_MSG_ERROR([Cannot determine endianness. Use ac_cv_c_bigendian to yes or no])
+fi
+AC_SUBST(ENDIAN)
+ENDIAN_MSG="$ENDIAN (ac_cv_c_bigendian=$ac_cv_c_bigendian)"
 
 # Check packages.
 # Check glib2.
@@ -162,6 +226,23 @@ PKG_CHECK_MODULES(GIO2, [
 PKG_CHECK_MODULES(GTHREAD2, [
     gthread-2.0 >= glib_required_version
 ])
+PKG_CHECK_EXISTS(
+    [glib-2.0 >= 2.65.0],
+    [AC_DEFINE(GLIB2_EMBED_ERRNO_H, TRUE, [glib2 include errno.h])]
+)
+AH_BOTTOM([
+#ifndef GLIB2_EMBED_ERRNO_H
+#  include <errno.h>
+#endif
+])
+
+if test "x$cross_compiling" = "xyes"; then
+PKG_PROG_PKG_CONFIG_FOR_BUILD
+GLIB_CFLAGS_FOR_BUILD=`$PKG_CONFIG_FOR_BUILD --cflags glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0 gthread-2.0`
+GLIB_LIBS_FOR_BUILD=`$PKG_CONFIG_FOR_BUILD --libs glib-2.0 gobject-2.0 gio-2.0 gio-unix-2.0 gthread-2.0`
+AC_SUBST(GLIB_CFLAGS_FOR_BUILD)
+AC_SUBST(GLIB_LIBS_FOR_BUILD)
+fi
 
 # --disable-tests option.
 AC_ARG_ENABLE(tests,
@@ -193,6 +274,18 @@ AC_ARG_ENABLE(gtk3,
 )
 AM_CONDITIONAL([ENABLE_GTK3], [test x"$enable_gtk3" = x"yes"])
 
+# --enable-gtk4 option.
+AC_ARG_ENABLE(gtk4,
+    AS_HELP_STRING([--enable-gtk4],
+                   [Build gtk4 im module]),
+    [enable_gtk4=$enableval],
+    [enable_gtk4=yes]
+)
+AM_CONDITIONAL([ENABLE_GTK4], [test x"$enable_gtk4" = x"yes"])
+
+AM_CONDITIONAL([ENABLE_GTK3_OR_4],
+               [test x"$enable_gtk3" = x"yes" || test x"$enable_gtk4" = x"yes"])
+
 # --disable-xim option.
 AC_ARG_ENABLE(xim,
     AS_HELP_STRING([--disable-xim],
@@ -202,16 +295,12 @@ AC_ARG_ENABLE(xim,
 )
 AM_CONDITIONAL([ENABLE_XIM], [test x"$enable_xim" = x"yes"])
 
-if test x"$enable_xim" = x"yes"; then
-    AC_SUBST([XIM_CLI_ARG], [--xim])
-fi
-
 # --enable-wayland option.
 AC_ARG_ENABLE(wayland,
     AS_HELP_STRING([--enable-wayland],
                    [Build wayland support]),
     [enable_wayland=$enableval],
-    [enable_wayland=no]
+    [enable_wayland=yes]
 )
 AM_CONDITIONAL([ENABLE_WAYLAND], [test x"$enable_wayland" = x"yes"])
 
@@ -232,8 +321,7 @@ if test x"$enable_gtk2" = x"yes"; then
 
     gtk2_binary_version=`$PKG_CONFIG --variable=gtk_binary_version gtk+-2.0`
     GTK2_IM_MODULEDIR="$libdir"/gtk-2.0/$gtk2_binary_version/immodules
-else
-    enable_gtk2="no (disabled, use --enable-gtk2 to enable)"
+    enable_gtk2="yes (enabled, use --disable-gtk2 to disable)"
 fi
 
 if test x"$enable_gtk3" = x"yes"; then
@@ -241,21 +329,40 @@ if test x"$enable_gtk3" = x"yes"; then
     PKG_CHECK_MODULES(GTK3, [
         gtk+-3.0 >= gtk3_required_version
     ])
-    PKG_CHECK_EXISTS([gdk-wayland-3.0],
-        [enable_gdk3_wayland=yes],
-        [enable_gdk3_wayland=no]
-    )
+    if test x"$enable_wayland" = x"yes"; then
+        PKG_CHECK_EXISTS([gdk-wayland-3.0],
+            [enable_gdk3_wayland=yes],
+            [enable_gdk3_wayland=no]
+        )
+    else
+        enable_gdk3_wayland=no
+    fi
 
     gtk3_binary_version=`$PKG_CONFIG --variable=gtk_binary_version gtk+-3.0`
     GTK3_IM_MODULEDIR="$libdir"/gtk-3.0/$gtk3_binary_version/immodules
 else
-    enable_gtk3="no (disabled, use --enable-gtk3 to enable)"
     enable_gdk3_wayland=no
 fi
 if test x"$enable_gdk3_wayland" != x"yes"; then
     enable_gdk3_wayland="no (disabled, need to install gdk-wayland-3.0.pc)"
 fi
 AM_CONDITIONAL([ENABLE_GDK3_WAYLAND], [test x"$enable_gdk3_wayland" = x"yes"])
+IBUS_UI_WAYLAND_DESKTOP="org.freedesktop.IBus.Panel.Wayland.Gtk3.desktop"
+AC_SUBST(IBUS_UI_WAYLAND_DESKTOP)
+AC_DEFINE_UNQUOTED(UI_WAYLAND_DESKTOP, "$IBUS_UI_WAYLAND_DESKTOP",
+                   [Desktop filename of IBus Wayland UI.])
+AC_DEFINE_UNQUOTED(DATADIR, "$ibus_datadir", [Datadir.])
+
+if test x"$enable_gtk4" = x"yes"; then
+    # check for gtk4
+    PKG_CHECK_MODULES(GTK4, [
+        gtk4
+    ])
+
+    gtk4_binary_version=`$PKG_CONFIG --variable=gtk_binary_version gtk4`
+    GTK4_IM_MODULEDIR="$libdir"/gtk-4.0/$gtk4_binary_version/immodules
+    enable_gtk4="yes (enabled, use --disable-gtk4 to disable)"
+fi
 
 if test x"$enable_xim" = x"yes"; then
     # Check for x11
@@ -271,8 +378,12 @@ if test x"$enable_xim" = x"yes"; then
             gtk+-2.0
         ])
     fi
-else
-    enable_xim="no (disabled, use --enable-xim to enable)"
+    AC_SUBST([XIM_CLI_ARG], [--xim])
+    AC_DEFINE(HAVE_XIM, 1, [Define to enable XIM])
+    enable_xim="yes (enabled, use --disable-xim to disable)"
+fi
+if test x"$enable_gtk3" = x"yes"; then
+    enable_gtk3="yes (enabled, use --disable-gtk3 to disable)"
 fi
 
 if $PKG_CONFIG --exists x11; then
@@ -284,41 +395,45 @@ else
 fi
 AC_SUBST(X11_PREFIX)
 
+# Check locale dir for Compose files.
+if test x"$cross_compiling" != xyes; then
+    AC_CHECK_FILE($X11_PREFIX/share/X11/locale/locale.dir,
+                  X11_LOCALEDATADIR="$X11_PREFIX/share/X11/locale",
+                  [AC_CHECK_FILE($X11_PREFIX/lib/X11/locale/locale.dir,
+                                 X11_LOCALEDATADIR="$X11_PREFIX/lib/X11/locale",
+                                 X11_LOCALEDATADIR="$(datadir)/X11/locale")])
+else
+    if test x"$X11_LOCALEDATADIR" = x; then
+        X11_LOCALEDATADIR="$X11_PREFIX/share/X11/locale"
+    fi
+    AC_MSG_RESULT([Skipping X11 locale directory check when cross compiling. Using: $X11_LOCALEDATADIR])
+fi
+AC_SUBST(X11_LOCALEDATADIR)
+
 if test x"$enable_wayland" = x"yes"; then
     # Check for wayland
     PKG_CHECK_MODULES(WAYLAND, [
         wayland-client >= 1.2.0
         xkbcommon
     ])
+    PKG_CHECK_EXISTS([wayland-protocols],
+        [WAYLAND_PRTCLS_DIR="`$PKG_CONFIG --variable=pkgdatadir wayland-protocols`"],
+        [WAYLAND_PRTCLS_DIR="/usr/share/wayland-protocols"]
+    )
+    WAYLAND_PRTCLS_DIR="`echo $WAYLAND_PRTCLS_DIR`"
     m4_ifdef([WAYLAND_SCANNER_RULES],
-             [WAYLAND_PRTCLS_SUBDIR='wayland-protocols/unstable/input-method'
-              AC_SUBST(WAYLAND_PRTCLS_SUBDIR)
-              WAYLAND_SCANNER_RULES(['$(datadir)/$(WAYLAND_PRTCLS_SUBDIR)'])],
+             [WAYLAND_IM_PRTCL_SUBDIR='unstable/input-method'
+              WAYLAND_TEXT_PRTCL_SUBDIR='unstable/text-input'
+              AC_SUBST(WAYLAND_PRTCLS_DIR)
+              AC_SUBST(WAYLAND_IM_PRTCL_SUBDIR)
+              AC_SUBST(WAYLAND_TEXT_PRTCL_SUBDIR)
+              WAYLAND_SCANNER_RULES(['$(WAYLAND_PRTCLS_DIR)/$(WAYLAND_IM_PRTCL_SUBDIR)'])],
              [AC_SUBST(wayland_scanner_rules)])
+    enable_wayland="yes (enabled, use --disable-wayland to disable)"
 else
-    enable_wayland="no (disabled, use --enable-wayland to enable)"
+    wayland_scanner_rules="./wayland-scanner.mk"
     AC_SUBST(wayland_scanner_rules)
 fi
-
-enable_appindicator_engine_icon="no"
-if test x"$enable_appindicator" = x"yes"; then
-    enable_appindicator="yes (enabled, use --disable-appindicator to disable)"
-
-    # Need qt5-qtbase-devel package
-    # There is no way to check the version of KStatusNotifierItem and
-    # check the version of qtbase here.
-    AC_MSG_CHECKING([for KDE5 appindicator engine icon])
-    PKG_CHECK_EXISTS([Qt5Gui >= 5.4],
-        enable_appindicator_engine_icon="yes"
-    )
-    AC_MSG_RESULT([$enable_appindicator_engine_icon])
-
-fi
-if test x"$enable_appindicator_engine_icon" != x"yes" ; then
-    enable_appindicator_engine_icon="no (disabled, need qtbase-devel 5.4 or later)"
-fi
-AM_CONDITIONAL([ENABLE_APPINDICATOR_ENGINE_ICON],
-               [test x"$enable_appindicator_engine_icon" = x"yes"])
 
 # GObject introspection
 GOBJECT_INTROSPECTION_CHECK([0.6.8])
@@ -379,6 +494,22 @@ if test x"$enable_dconf" = x"yes"; then
     enable_dconf="yes (enabled, use --disable-dconf to disable)"
 fi
 
+AC_ARG_ENABLE(systemd-services,
+    AS_HELP_STRING([--disable-systemd-services],
+                   [Disable systemd services installation]),
+    [enable_systemd=$enableval],
+    [enable_systemd=yes]
+)
+AM_CONDITIONAL([ENABLE_SYSTEMD], [test x"$enable_systemd" = x"yes"])
+
+if test x"$enable_systemd" = x"yes"; then
+    PKG_CHECK_MODULES(SYSTEMD, [
+        systemd >= 0.7.5
+    ])
+    AC_SUBST([SYSTEMD_USER_UNIT_DIR], [`$PKG_CONFIG --define-variable prefix='${prefix}' --variable systemduserunitdir systemd`])
+    enable_systemd="yes (enabled, use --disable-systemd-services to disable)"
+fi
+
 # Check env.
 AC_PATH_PROG(ENV_IBUS_TEST, env)
 AC_SUBST(ENV_IBUS_TEST)
@@ -433,13 +564,27 @@ AM_CONDITIONAL([ENABLE_DAEMON], [true])
 
 PYGOBJECT_REQUIRED=3.0.0
 
+# Define Python overrides dir.
+# When IBus is built with the Json files in test directory, the build
+# tries to install IBus.py file into pyoverridesdir.
+# The default GI directory is /usr in Flatpak but the directory is readonly
+# with `flatpak-builder` and the Flatpak specific GI files are installed in
+# /app GI directory.
+AC_ARG_WITH(python-overrides-dir,
+    AS_HELP_STRING([--with-python-overrides-dir[=DIR]],
+        [Select Python overrides dir]),
+    pyoverridesdir=$with_python_overrides_dir
+)
+
 PKG_CHECK_EXISTS([pygobject-3.0 >= $PYGOBJECT_REQUIRED],
                  [enable_pygobject=yes], [enable_pygobject=no])
 
 if test "x$enable_pygobject" = "xyes"; then
     PKG_CHECK_MODULES(PYTHON, [pygobject-3.0 >= $PYGOBJECT_REQUIRED])
 
-    pyoverridesdir=`$PYTHON -c "import gi; print(gi._overridesdir)"`
+    if test x"$pyoverridesdir" = x""; then
+        pyoverridesdir=`$PYTHON -c "import gi; print(gi._overridesdir)"`
+    fi
     AC_SUBST(pyoverridesdir)
 
     if test x"$enable_python2" = x"yes"; then
@@ -493,6 +638,28 @@ AC_ARG_WITH(gtk3-im-module-dir,
     GTK3_IM_MODULEDIR=$with_gtk3_im_module_dir
 )
 AC_SUBST(GTK3_IM_MODULEDIR)
+
+# Define gtk4 immodule dir.
+AC_ARG_WITH(gtk4-im-module-dir,
+    AS_HELP_STRING([--with-gtk4-im-module-dir[=DIR]],
+        [Select gtk4 immodule dir]),
+    GTK4_IM_MODULEDIR=$with_gtk4_im_module_dir
+)
+AC_SUBST(GTK4_IM_MODULEDIR)
+
+AC_MSG_CHECKING([for $PYTHON GI GnomeDesktop module])
+if AC_RUN_LOG([$PYTHON -c "def _configure_test():
+    from gi import require_version as gi_require_version
+    gi_require_version('GnomeDesktop', '4.0')
+    from gi.repository import GnomeDesktop
+_configure_test()"]); then
+    enable_pygnome_desktop="yes"
+else
+    enable_pygnome_desktop="no"
+fi
+AC_MSG_RESULT([$enable_pygnome_desktop])
+AM_CONDITIONAL([ENABLE_PYGNOME_DESKTOP],
+               [test x"$enable_pygnome_desktop" = x"yes"])
 
 if test x"$enable_python" = x"yes"; then
     # Check for dbus-python.
@@ -560,14 +727,13 @@ AC_SUBST(IBUS_ICON_KEYBOARD)
 # --disable-surrounding-text option.
 AC_ARG_ENABLE(surrounding-text,
     AS_HELP_STRING([--disable-surrounding-text],
-        [Enable surrounding-text support]),
+        [Disable surrounding-text support]),
     [enable_surrounding_text=$enableval],
     [enable_surrounding_text=yes]
 )
 if test x"$enable_surrounding_text" = x"yes"; then
     AC_DEFINE(ENABLE_SURROUNDING, TRUE, [Enable surrounding-text support])
-else
-    enable_surrounding_text="no (disabled, use --enable-surrounding-text to enable)"
+    enable_surrounding_text="yes (enabled, use --disable-surrounding-text to disable)"
 fi
 
 # --disable-ui
@@ -579,11 +745,47 @@ AC_ARG_ENABLE(ui,
 )
 AM_CONDITIONAL([ENABLE_UI], [test x"$enable_ui" = x"yes"])
 if test x"$enable_ui" = x"yes"; then
-    # Check for x11
-    PKG_CHECK_MODULES(X11, [
-        x11
-    ])
     enable_ui="yes (enabled, use --disable-ui to disable)"
+fi
+
+# --enable-macos-im / --enable-macos-ui
+case "$host_os" in
+    darwin*)
+        enable_macos_default=yes
+        ;;
+    *)
+        enable_macos_default=no
+        ;;
+esac
+AC_ARG_ENABLE(macos-im,
+    AS_HELP_STRING([--enable-macos-im],
+                   [Enable macOS InputMethodKit client]),
+    [enable_macos_im=$enableval],
+    [enable_macos_im=$enable_macos_default]
+)
+AC_ARG_ENABLE(macos-ui,
+    AS_HELP_STRING([--enable-macos-ui],
+                   [Enable ibus panel user interface for macOS]),
+    [enable_macos_ui=$enableval],
+    [enable_macos_ui=$enable_macos_default]
+)
+AM_CONDITIONAL([ENABLE_MACOS], [test x"$enable_macos_im" = x"yes"])
+AM_CONDITIONAL([ENABLE_MACOS_UI], [test x"$enable_macos_ui" = x"yes"])
+if test x"$enable_macos_im" = x"yes"; then
+    enable_macos_im="yes (enabled, use --disable-macos-im to disable)"
+else
+    enable_macos_im="no (disabled, use --enable-macos-im to enable)"
+fi
+if test x"$enable_macos_ui" = x"yes"; then
+    enable_macos_ui="yes (enabled, use --disable-macos-ui to disable)"
+else
+    enable_macos_ui="no (disabled, use --enable-macos-ui to enable)"
+fi
+
+if test x"$enable_appindicator" = x"yes"; then
+    PKG_CHECK_MODULES(DBUSMENU_GLIB, [dbusmenu-glib-0.4])
+    PKG_CHECK_MODULES(DBUSMENU_GTK3, [dbusmenu-gtk3-0.4])
+    enable_appindicator="yes (enabled, use --disable-appindicator to disable)"
 fi
 
 # --disable-engine
@@ -598,12 +800,46 @@ if test x"$enable_engine" = x"yes"; then
     enable_engine="yes (enabled, use --disable-engine to disable)"
 fi
 
-PKG_CHECK_MODULES(XTEST,
-    [x11 xtst],
-    [enable_xtest=yes],
-    [enable_xtest=no]
+# --disable-libnotify
+AC_ARG_ENABLE(libnotify,
+    AS_HELP_STRING([--disable-libnotify],
+                   [Disable to link libnotify]),
+    [enable_libnotify=$enableval],
+    [enable_libnotify=yes]
 )
-AM_CONDITIONAL([ENABLE_XTEST], [test x"$enable_xtest" = x"yes"])
+AM_CONDITIONAL([ENABLE_LIBNOTIFY], [test x"$enable_libnotify" = x"yes"])
+if test x"$enable_libnotify" = x"yes"; then
+    PKG_CHECK_MODULES(LIBNOTIFY, [
+        libnotify >= 0.7
+    ])
+    enable_libnotify="yes (enabled, use --disable-libnotify to disable)"
+fi
+
+PKG_CHECK_MODULES(LIBEVDEV,
+    [libevdev libudev],
+    [enable_libevdev=yes],
+    [enable_libevdev=no]
+)
+AM_CONDITIONAL([ENABLE_LIBEVDEV], [test x"$enable_libevdev" = x"yes"])
+
+PKG_CHECK_MODULES(XFIXES,
+    [x11 xfixes >= 6],
+    [AC_DEFINE([HAVE_XFIXES], [1], [Define to enable XFixes])
+     have_xfixes=yes],
+    [have_xfixes="no (libXfixes version is lower than 6)"]
+)
+
+# --enable-distro-tests
+AC_ARG_ENABLE(distro-tests,
+    AS_HELP_STRING([--enable-distro-tests],
+                   [Enable to test distro files]),
+    [enable_distro_tests=$enableval],
+    [enable_distro_tests=no]
+)
+AM_CONDITIONAL([ENABLE_DISTRO_TESTS], [test x"$enable_distro_tests" = x"yes"])
+if test x"$enable_distro_tests" = x"no"; then
+    enable_distro_tests="no (disabled, use --enable-distro-tests to enable)"
+fi
 
 # --enable-install-tests
 AC_ARG_ENABLE(install-tests,
@@ -736,50 +972,104 @@ PKG_CHECK_MODULES(ISOCODES, [
 ISOCODES_PREFIX=`$PKG_CONFIG iso-codes --variable=prefix`
 AC_SUBST(ISOCODES_PREFIX)
 
+PKG_CHECK_MODULES(XKBCONFIG,
+    [xkeyboard-config],
+    [XKBCONFIG_BASE=`$PKG_CONFIG xkeyboard-config --variable=xkb_base`],
+    [XKBCONFIG_BASE='$(datarootdir)/X11/xkb']
+)
+AC_SUBST(XKBCONFIG_BASE)
+
 AC_SUBST([GDBUS_CODEGEN], [`$PKG_CONFIG --variable gdbus_codegen gio-2.0`])
 
+OUTPUT_TAIL=''
+HAS_OUTPUT_TAIL=0
+AS_IF([test x"$enable_wayland" = x"no"],
+      [OUTPUT_TAIL="$OUTPUT_TAIL
+You invoked the \`configure\` script with disabled wayland option
+so you have to run
+\`make -C tools maintainer-clean-generic\` to regenerate C files with VALA
+before run \`make\`.
+"
+       HAS_OUTPUT_TAIL=1
+      ],
+      []
+)
+AS_IF([test x"$enable_ui" != x"no" &&
+       test -f "$ac_confdir/ui/gtk3/application.c"
+      ],
+      [AS_IF([test x"$enable_appindicator" = x"no" ||
+              test x"$enable_xim" = x"no" ||
+              test x"$enable_gdk3_wayland" != x"yes" ||
+              test x"$enable_emoji_dict" = x"no"
+             ],
+             [OUTPUT_TAIL="$OUTPUT_TAIL
+You invoked the \`configure\` script with either disabled appinicator, xim,
+gdk3_wayland or emoji_dict option so you have to run
+\`make -C ui/gtk3 maintainer-clean-generic\` to regenerate C files with VALA
+before run \`make\`.
+"
+              HAS_OUTPUT_TAIL=1
+             ],
+             [])
+      ],
+      []
+)
+
+
 # OUTPUT files
-AC_CONFIG_FILES([ po/Makefile.in
-Makefile
-ibus-1.0.pc
-ibus.spec
+AC_CONFIG_FILES([
+po/Makefile.in
+bindings/Makefile
+bindings/pygobject/Makefile
+bindings/vala/Makefile
+bus/Makefile
+bus/ibus-daemon.1
+bus/services/Makefile
 client/Makefile
 client/gtk2/Makefile
 client/gtk3/Makefile
+client/gtk4/Makefile
 client/x11/Makefile
 client/wayland/Makefile
-src/Makefile
-src/ibusversion.h
-src/tests/Makefile
-bus/Makefile
-portal/Makefile
-engine/Makefile
-util/Makefile
-util/IMdkit/Makefile
+client/macos/Makefile
+conf/Makefile
+conf/dconf/Makefile
+conf/memconf/Makefile
 data/Makefile
 data/annotations/Makefile
 data/icons/Makefile
 data/its/Makefile
 data/keymaps/Makefile
 data/dconf/Makefile
+data/dconf/00-upstream-settings.5
+data/dconf/ibus.5
 docs/Makefile
 docs/reference/Makefile
 docs/reference/ibus/ibus-docs.sgml
 docs/reference/ibus/Makefile
-m4/Makefile
+engine/Makefile
 ibus/_config.py
 ibus/Makefile
 ibus/interface/Makefile
+m4/Makefile
+portal/Makefile
+setup/Makefile
+setup/ibus-setup.1
+src/Makefile
+src/compose/Makefile
+src/ibusversion.h
+src/tests/Makefile
+tools/Makefile
+tools/ibus.1
 ui/Makefile
 ui/gtk3/Makefile
-setup/Makefile
-bindings/Makefile
-bindings/pygobject/Makefile
-bindings/vala/Makefile
-conf/Makefile
-conf/dconf/Makefile
-conf/memconf/Makefile
-tools/Makefile
+ui/gtk3/ibus-emoji.7
+ui/macospanel/Makefile
+util/Makefile
+util/IMdkit/Makefile
+Makefile
+ibus-1.0.pc
+ibus.spec
 ])
 
 AC_OUTPUT
@@ -789,19 +1079,23 @@ Build options:
   Install prefix                $prefix
   Build shared libs             $enable_shared
   Build static libs             $enable_static
+  Build endianness              $ENDIAN_MSG
   CFLAGS                        $CFLAGS
   PYTHON                        $PYTHON
   PYTHON2                       $PYTHON2
+  Python overrides dir          $pyoverridesdir
+  Python GI GnomeDesktop module $enable_pygnome_desktop
   Enable python2                $enable_python2
   Gtk2 immodule dir             $GTK2_IM_MODULEDIR
   Gtk3 immodule dir             $GTK3_IM_MODULEDIR
+  Gtk4 immodule dir             $GTK4_IM_MODULEDIR
   Build gtk2 immodule           $enable_gtk2
   Build gtk3 immodule           $enable_gtk3
+  Build gtk4 immodule           $enable_gtk4
   Build XIM agent server        $enable_xim
   Build wayland support         $enable_wayland
   Build gdk3 wayland support    $enable_gdk3_wayland
   Build appindicator support    $enable_appindicator
-  Build appindicator engine icon $enable_appindicator_engine_icon
   Build python library          $enable_python_library
   Build memconf modules         $enable_memconf
   Build dconf modules           $enable_dconf
@@ -810,18 +1104,27 @@ Build options:
   Build vala binding            $enable_vala
   Build document                $enable_gtk_doc
   Build UI                      $enable_ui
+  Build macOS IM client         $enable_macos_im
+  Build UI for macOS            $enable_macos_ui
   Build engine                  $enable_engine
   Enable key snooper            $enable_key_snooper
   No snooper regexes            "$NO_SNOOPER_APPS"
   Panel icon                    "$IBUS_ICON_KEYBOARD"
   Enable surrounding-text       $enable_surrounding_text
+  Enable libnotify              $enable_libnotify
   Enable Emoji dict             $enable_emoji_dict
   Unicode Emoji directory       $UNICODE_EMOJI_DIR
   CLDR annotation directory     $EMOJI_ANNOTATION_DIR
   Enable Unicode dict           $enable_unicode_dict
   UCD directory                 $UCD_DIR
   Socket directory              "$IBUS_SOCKET_DIR"
+  XFixes client disconnect      $have_xfixes
+  Install systemd service       $enable_systemd
   Run test cases                $enable_tests
+  Distro tests                  $enable_distro_tests
   Install tests                 $enable_install_tests
 ])
-
+AS_IF([test $HAS_OUTPUT_TAIL -eq 1],
+      [AC_MSG_WARN([$OUTPUT_TAIL])],
+      []
+)

@@ -1,12 +1,24 @@
-#!/bin/bash
+#!/bin/sh
 
 set -e
+
+if [ ! -z $1 ]; then
+  BUILDDIR="$1"
+else
+  BUILDDIR="$PWD"
+fi
+
+if [ ! -z $2 ]; then
+  SRCDIR="$2"
+else
+  SRCDIR="$PWD"
+fi
 
 # gnome-continuous doesn't have a machine-id set, which
 # breaks dbus-launch.  There's dbus-run-session which is
 # better, but not everyone has it yet.
 export DBUS_FATAL_WARNINGS=0
-export TMPDIR=$(mktemp -d --tmpdir="$PWD")
+export TMPDIR=$(mktemp -d --tmpdir="$BUILDDIR")
 export XDG_CONFIG_HOME="$TMPDIR/config"
 export XDG_CACHE_HOME="$TMPDIR/cache"
 export GSETTINGS_SCHEMA_DIR="$TMPDIR/schemas"
@@ -14,10 +26,15 @@ mkdir -p $XDG_CONFIG_HOME $XDG_CACHE_HOME $GSETTINGS_SCHEMA_DIR
 
 eval `dbus-launch --sh-syntax`
 
-trap 'rm -rf $TMPDIR; kill $DBUS_SESSION_BUS_PID' ERR
+trap cleanup EXIT
+
+cleanup() {
+  test $? -eq 0 && exit
+  rm -rf $TMPDIR; kill $DBUS_SESSION_BUS_PID
+}
 
 # in case that schema is not installed on the system
-glib-compile-schemas --targetdir "$GSETTINGS_SCHEMA_DIR" "$PWD"
+glib-compile-schemas --targetdir "$GSETTINGS_SCHEMA_DIR" "$SRCDIR"
 
 cat <<EOF
 # This file is a part of the IBus packaging and should not be changed.
@@ -45,6 +62,12 @@ for schema in $schemas; do
   done
 done
 
+# dbus-launch and gsettings run /usr/lib*/gvfsd-fuse $TMPDIR/cache/gvfs -f
+# via systemd since gvfs 1.45.90 in Fedora 33
+# and rm $TMPDIR could be failed until umount would be called.
+if [ -d $TMPDIR/cache/gvfs ] ; then
+    umount $TMPDIR/cache/gvfs
+fi
 rm -rf $TMPDIR
 
 kill $DBUS_SESSION_BUS_PID

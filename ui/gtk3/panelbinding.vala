@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2018 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2018 Takao Fujwiara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2018-2026 Takao Fujwiara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -190,7 +190,7 @@ class Preedit : Gtk.Window {
 
     public IBus.Text get_commit_text() {
         string extension_text = m_extension_preedit_emoji.get_text();
-        if (extension_text.length == 0)
+        if (extension_text.length == 0 && m_prefix != "u")
             extension_text = m_extension_preedit_text.get_text();
         return new IBus.Text.from_string(extension_text);
     }
@@ -217,6 +217,7 @@ class PanelBinding : IBus.PanelService {
     private IBusEmojier? m_emojier;
     private uint m_emojier_set_emoji_lang_id;
     private uint m_emojier_focus_commit_text_id;
+    private uint m_emojier_focus_emoji_category_id;
     private string[] m_emojier_favorites = {};
     private Gtk.CssProvider m_css_provider;
     private const uint PRELOAD_ENGINES_DELAY_TIME = 30000;
@@ -268,6 +269,22 @@ class PanelBinding : IBus.PanelService {
                 BindingCommon.set_custom_font(m_settings_panel,
                                               m_settings_emoji,
                                               ref m_css_provider);
+        });
+
+        m_settings_panel.changed["custom-theme"].connect((key) => {
+                BindingCommon.set_custom_theme(m_settings_panel);
+        });
+
+        m_settings_panel.changed["use-custom-theme"].connect((key) => {
+                BindingCommon.set_custom_theme(m_settings_panel);
+        });
+
+        m_settings_panel.changed["custom-icon"].connect((key) => {
+                BindingCommon.set_custom_icon(m_settings_panel);
+        });
+
+        m_settings_panel.changed["use-custom-icon"].connect((key) => {
+                BindingCommon.set_custom_icon(m_settings_panel);
         });
 
         m_settings_emoji.changed["unicode-hotkey"].connect((key) => {
@@ -422,6 +439,8 @@ class PanelBinding : IBus.PanelService {
         BindingCommon.set_custom_font(m_settings_panel,
                                       m_settings_emoji,
                                       ref m_css_provider);
+        BindingCommon.set_custom_theme(m_settings_panel);
+        BindingCommon.set_custom_icon(m_settings_panel);
         set_emoji_favorites();
         if (m_load_emoji_at_startup && !m_loaded_emoji)
             set_emoji_lang();
@@ -459,6 +478,9 @@ class PanelBinding : IBus.PanelService {
                     "is-enabled", false,
                     "is-extension", true);
             panel_extension(event);
+            // Vala calls event.ref_sink() and panel_extension() does not unref
+            // the event and need to call event.unref() here.
+            event.unref();
         }
         string committed_string = text.text;
         string preedit_string = m_preedit.get_text();
@@ -484,9 +506,18 @@ class PanelBinding : IBus.PanelService {
             return true;
         string selected_string = m_emojier.get_selected_string();
         string prev_context_path = m_emojier.get_input_context_path();
-        if (selected_string != null &&
-            prev_context_path != "" &&
-            prev_context_path == m_current_context_path) {
+        if (selected_string != null && prev_context_path != "") {
+            if (prev_context_path != m_current_context_path) {
+                if (m_is_wayland) {
+                    // Using Wayland input-method protocol in Plasma Wayland
+                    // always allocates new input contexts with focus changes.
+                    debug("Prev input context path %s, now %s",
+                          prev_context_path,
+                          m_current_context_path);
+                } else {
+                    return false;
+                }
+            }
             IBus.Text text = new IBus.Text.from_string(selected_string);
             commit_text_update_favorites(text, false);
             m_emojier.reset();
@@ -550,14 +581,19 @@ class PanelBinding : IBus.PanelService {
                 "is-enabled", false,
                 "is-extension", true);
         panel_extension(event);
+        // Vala calls event.ref_sink() and panel_extension() does not unref
+        // the event and need to call event.unref() here.
+        event.unref();
         return false;
     }
 
 
     private bool key_press_keyval(uint keyval) {
         unichar ch = IBus.keyval_to_unicode(keyval);
+        if (m_extension_name == "unicode" && !ch.isxdigit())
+            return false;
         if (ch.iscntrl())
-                return false;
+            return false;
         string str = ch.to_string();
         m_preedit.append_text(str);
         string annotation = m_preedit.get_text();
@@ -602,6 +638,8 @@ class PanelBinding : IBus.PanelService {
                     m_emojier.key_press_cursor_horizontal(Gdk.Key.Right, 0);
             } else {
                 m_emojier.set_annotation(annotation);
+                var text = m_emojier.get_title_text();
+                show_candidate = (text.text.get_char() == 0x26A0);
             }
         }
         convert_preedit_text();
@@ -708,10 +746,11 @@ class PanelBinding : IBus.PanelService {
     private void show_wayland_lookup_table(IBus.Text text) {
         m_wayland_lookup_table_is_visible = true;
         var table = m_emojier.get_one_dimension_lookup_table();
+        bool do_show_auxiliary_text = (text.text.get_char() == 0x26A0);
         uint ncandidates = table.get_number_of_candidates();
         update_auxiliary_text_received(
                 text,
-                ncandidates > 0 ? true : false);
+                do_show_auxiliary_text ? true : ncandidates > 0 ? true : false);
         update_lookup_table_received(
                 table,
                 ncandidates > 0 ? true : false);
@@ -756,18 +795,36 @@ class PanelBinding : IBus.PanelService {
 
     private void show_preedit_and_candidate(bool show_candidate) {
         uint cursor_pos = 0;
+        IBus.Text text;
+        bool visible = true;
+
         if (!show_candidate)
             cursor_pos = m_preedit.get_engine_preedit_cursor_pos();
+        /* Showing Emojier in Wayland takes the input focus
+         * and the focus change causes the preedit commit in Qt applications
+         * likes kwrite.
+         * so need to clear the preedit text before showing Emojier.
+         *
+         * Use m_preedit.get_text() because
+         * m_wayland_lookup_table_is_visible will be true after
+         * show_emoji_lookup_table() is called below.
+         */
+        if (show_candidate && m_is_wayland && m_preedit.get_text() == "") {
+            if (m_emojier == null)
+                return;
+            visible = false;
+            text = new IBus.Text.from_static_string("");
+        } else {
+            text = m_preedit.get_engine_preedit_text();
+        }
         update_preedit_text_received(
-                m_preedit.get_engine_preedit_text(),
+                text,
                 cursor_pos,
-                true);
+                visible);
         if (!show_candidate) {
             hide_emoji_lookup_table();
             return;
         }
-        if (m_emojier == null)
-            return;
         /* Wayland gives the focus on Emojir which is a GTK popup window
          * and move the focus fom the current input context to Emojier.
          * This forwards the lookup table to gnome-shell's lookup table
@@ -797,6 +854,23 @@ class PanelBinding : IBus.PanelService {
 
     public override void focus_out(string input_context_path) {
         m_current_context_path = "";
+        /* Close emoji typing when the focus out happens but it's not a
+         * rebuilding GUI.
+         * Emojier rebuilding GUI happens when Escape key is pressed on
+         * Emojier candidate list and the rebuilding also causes focus-out/in
+         * events in GNOME Wayland but not Xorg desktops.
+         * The rebuilding GUI can be checked with m_emojier.is_rebuilding_gui()
+         * in Wayland.
+         * m_emojier.is_rebuilding_gui() always returns false in Xorg desktops
+         * since focus-out/in events does not happen.
+         */
+        if (m_emojier != null && !m_emojier.is_rebuilding_gui()) {
+            m_preedit.reset();
+            m_emojier.set_annotation("");
+            if (m_wayland_lookup_table_is_visible)
+                hide_wayland_lookup_table();
+            key_press_escape();
+        }
     }
 
 
@@ -811,6 +885,9 @@ class PanelBinding : IBus.PanelService {
         m_enable_extension = event.is_enabled;
         if (!m_enable_extension) {
             hide_emoji_lookup_table();
+            update_preedit_text_received(new IBus.Text.from_string(""),
+                                         0,
+                                         false);
             return;
         }
         if (!m_loaded_emoji)
@@ -820,7 +897,7 @@ class PanelBinding : IBus.PanelService {
             m_loaded_unicode = true;
         }
         if (m_emojier == null) {
-            m_emojier = new IBusEmojier();
+            m_emojier = new IBusEmojier(m_is_wayland);
             // For title handling in gnome-shell
             m_application.add_window(m_emojier);
             m_emojier.candidate_clicked.connect((i, b, s) => {
@@ -836,6 +913,14 @@ class PanelBinding : IBus.PanelService {
                         "is-enabled", false,
                         "is-extension", true);
                 panel_extension(close_event);
+                // Vala calls event.ref_sink() and panel_extension() does not
+                // unref the event and need to call event.unref() here.
+                close_event.unref();
+            });
+            m_emojier.send_message.connect((m) => {
+                if (m_extension_name == "unicode")
+                    return;
+                send_message(m);
             });
         }
         m_emojier.reset();
@@ -848,8 +933,14 @@ class PanelBinding : IBus.PanelService {
                 true);
         string params = event.get_params();
         if (params == "category-list") {
-            key_press_space();
-            show_preedit_and_candidate(true);
+            if (m_emojier_focus_emoji_category_id > 0)
+                return;
+            m_emojier_focus_emoji_category_id =
+                    GLib.Timeout.add_seconds(1, () => {
+                        info("Timeout to show Emoji category list.");
+                        show_category_list_real();
+                        return false;
+                    });
         }
     }
 
@@ -886,7 +977,27 @@ class PanelBinding : IBus.PanelService {
 
     public override void hide_preedit_text() {
         m_preedit.hide_engine_preedit_text();
+        /* Space key to launch Emojier category popup causes a hide-preedit-text
+         * signal by ibus_engine_simple_update_preedit_text().
+         * On the other hand, the Emoji preedit "e" should be hidden
+         * in Plasam Wayland before Qt applications commit the preedit
+         * with the focus-out event.
+         * So avoid the duplicated show_preedit_and_candidate() here.
+         * Emojier should hide the preedit by itself instead of the callback
+         * of each engine.
+         */
+        if (m_is_wayland && m_preedit.get_text() == "")
+            return;
         show_preedit_and_candidate(false);
+
+        /* Clicking on "Emoji Choice" will call ibus_engine_simple_focus_out()
+         * -> PanelBinding.hide_preedit_text() with IBusEngineSimple but not
+         * other engines.
+         */
+        if (m_emojier_focus_emoji_category_id > 0) {
+            GLib.Source.remove(m_emojier_focus_emoji_category_id);
+            show_category_list_real();
+        }
     }
 
 
@@ -1053,6 +1164,12 @@ class PanelBinding : IBus.PanelService {
         show_preedit_and_candidate(show_candidate);
     }
 
+    private void show_category_list_real() {
+                key_press_space();
+                show_preedit_and_candidate(true);
+                m_emojier_focus_emoji_category_id = 0;
+    }
+
     private void candidate_clicked_lookup_table_real(uint index,
                                                      uint button,
                                                      uint state,
@@ -1066,6 +1183,9 @@ class PanelBinding : IBus.PanelService {
                     "is-enabled", false,
                     "is-extension", true);
             panel_extension(event);
+            // Vala calls event.ref_sink() and panel_extension() does not unref
+            // the event and need to call event.unref() here.
+            event.unref();
             return;
         }
         if (m_emojier == null)

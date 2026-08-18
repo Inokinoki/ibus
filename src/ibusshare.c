@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2008-2018 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -20,7 +20,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
  * USA
  */
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
 
+#include "ibusresources.h"
 #include "ibusshare.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -32,6 +36,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <ibus.h>
+
+#ifdef G_OS_UNIX
+#include <grp.h>
+#endif
+
+#ifdef __APPLE__
+#include <time.h>
+#include <uuid/uuid.h>
+#endif
 
 static gchar *_display = NULL;
 
@@ -50,8 +63,19 @@ ibus_get_local_machine_id (void)
                                   &machine_id,
                                   NULL,
                                   NULL)) {
-            g_warning ("Unable to load /var/lib/dbus/machine-id: %s", error->message);
-            machine_id = "machine-id";
+#ifdef __APPLE__
+            uuid_t uuid;
+            struct timespec ts = { 0, 0 };
+            if (gethostuuid (uuid, &ts) == 0) {
+                machine_id = g_malloc0 (37);
+                uuid_unparse_lower (uuid, machine_id);
+            } else
+#endif
+            {
+                g_warning ("Unable to load /var/lib/dbus/machine-id: %s",
+                           error ? error->message : "unknown");
+                machine_id = "machine-id";
+            }
         }
         else {
             g_strstrip (machine_id);
@@ -78,6 +102,34 @@ ibus_get_user_name (void)
     return g_get_user_name ();
 }
 
+const gchar *
+ibus_get_group_name (void)
+{
+    static gchar *groupname = NULL;
+    struct group *grp = NULL;
+#ifdef HAVE_GETGRGID_R
+    char buffer[4096];
+    struct group gbuf;
+#endif
+
+    if (groupname)
+        return groupname;
+
+#ifdef HAVE_GETGRGID_R
+    /* MT-Safe locale */
+    getgrgid_r (getgid (), &gbuf, buffer, sizeof(buffer), &grp);
+#else
+    /* MT-Unsafe race:grgid locale */
+    grp = getgrgid (getgid ());
+#endif
+
+    g_return_val_if_fail (grp && grp->gr_name && grp->gr_name[0], NULL);
+
+    /* buffer will be erased out of this function. */
+    groupname = g_strdup (grp->gr_name);
+    return groupname;
+}
+
 glong
 ibus_get_daemon_uid (void)
 {
@@ -100,6 +152,7 @@ ibus_get_socket_path (void)
         gchar *display;
         gchar *displaynumber = "0";
         /* gchar *screennumber = "0"; */
+        gboolean is_wayland = FALSE;
         gchar *p;
 
         path = g_strdup (g_getenv ("IBUS_ADDRESS_FILE"));
@@ -108,13 +161,19 @@ ibus_get_socket_path (void)
         }
 
         if (_display == NULL) {
-            display = g_strdup (g_getenv ("DISPLAY"));
+            display = g_strdup (g_getenv ("WAYLAND_DISPLAY"));
+            if (display)
+                is_wayland = TRUE;
+            else
+                display = g_strdup (g_getenv ("DISPLAY"));
         }
         else {
             display = g_strdup (_display);
         }
 
-        if (display) {
+        if (is_wayland) {
+            displaynumber = display;
+        } else if (display) {
             p = display;
             hostname = display;
             for (; *p != ':' && *p != '\0'; p++);
@@ -190,22 +249,17 @@ ibus_get_address (void)
     FILE *pf;
 
     /* free address */
-    if (address != NULL) {
-        g_free (address);
-        address = NULL;
-    }
+    g_clear_pointer (&address, g_free);
 
     /* get address from env variable */
     address = g_strdup (g_getenv ("IBUS_ADDRESS"));
-    if (address) {
+    if (address)
         return address;
-    }
 
     /* read address from ~/.config/ibus/bus/soketfile */
     pf = fopen (ibus_get_socket_path (), "r");
-    if (pf == NULL) {
+    if (pf == NULL)
         return NULL;
-    }
 
     while (!feof (pf)) {
         gchar *p = buffer;
@@ -217,11 +271,12 @@ ibus_get_address (void)
             continue;
         /* parse IBUS_ADDRESS */
         if (strncmp (p, "IBUS_ADDRESS=", sizeof ("IBUS_ADDRESS=") - 1) == 0) {
-            address = p + sizeof ("IBUS_ADDRESS=") - 1;
-            for (p = (gchar *)address; *p != '\n' && *p != '\0'; p++);
+            gchar *head = p + sizeof ("IBUS_ADDRESS=") - 1;
+            for (p = head; *p != '\n' && *p != '\0'; p++);
             if (*p == '\n')
                 *p = '\0';
-            address = g_strdup (address);
+            g_free (address);
+            address = g_strdup (head);
             continue;
         }
 
@@ -234,9 +289,8 @@ ibus_get_address (void)
     }
     fclose (pf);
 
-    if (pid == -1 || kill (pid, 0) != 0) {
+    if (pid == -1 || kill (pid, 0) != 0)
         return NULL;
-    }
 
     return address;
 }
@@ -249,10 +303,19 @@ ibus_write_address (const gchar *address)
     g_return_if_fail (address != NULL);
 
     path = g_path_get_dirname (ibus_get_socket_path ());
-    g_mkdir_with_parents (path, 0700);
+    errno = 0;
+    if (g_mkdir_with_parents (path, 0700)) {
+        g_warning ("Failed to mkdir %s: %s", path, g_strerror (errno));
+        g_free (path);
+        return;
+    }
     g_free (path);
 
-    g_unlink (ibus_get_socket_path ());
+    errno = 0;
+    if (g_unlink (ibus_get_socket_path ())) {
+        g_warning ("Failed to unlink %s: %s",
+                   ibus_get_socket_path (), g_strerror (errno));
+    }
     pf = fopen (ibus_get_socket_path (), "w");
     g_return_if_fail (pf != NULL);
 
@@ -286,6 +349,10 @@ ibus_free_strv (gchar **strv)
 void
 ibus_init (void)
 {
+    static gboolean inited = FALSE;
+    if (inited)
+        return;
+
 #if !GLIB_CHECK_VERSION(2,35,0)
     g_type_init ();
 #endif
@@ -293,12 +360,18 @@ ibus_init (void)
     IBUS_TYPE_TEXT;
     IBUS_TYPE_ATTRIBUTE;
     IBUS_TYPE_ATTR_LIST;
-    IBUS_TYPE_LOOKUP_TABLE;
     IBUS_TYPE_COMPONENT;
+    IBUS_TYPE_EMOJI_DATA;
     IBUS_TYPE_ENGINE_DESC;
+    IBUS_TYPE_EXTENSION_EVENT;
+    IBUS_TYPE_LOOKUP_TABLE;
     IBUS_TYPE_OBSERVED_PATH;
     IBUS_TYPE_REGISTRY;
     IBUS_TYPE_X_EVENT;
+    IBUS_TYPE_UNICODE_BLOCK;
+    IBUS_TYPE_UNICODE_DATA;
+    _ibus_register_resource ();
+    inited = TRUE;
 }
 
 static GMainLoop *main_loop = NULL;

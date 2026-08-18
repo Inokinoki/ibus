@@ -3,9 +3,10 @@ IBus - Input Bus
 Introduction
 ===
 
-IBus is an Intelligent Input Bus. It is a new input framework for Linux OS.
-It provides full featured and user friendly input method user interface.
-It also may help developers to develop input method easily.
+IBus is an Intelligent Input Bus. It is a new input framework for Linux OS
+and an experimental port exists for macOS. It provides a full featured and
+user friendly input method user interface. It also may help developers to
+develop input methods easily.
 
 
 How to build & test IBus
@@ -19,6 +20,11 @@ It is ibus daemon.
 
 hotkeys:
 Super + Space: Change input method.
+
+macOS:
+An InputMethodKit client (`client/macos`) and Cocoa panel
+(`ui/macospanel`) are built automatically on Darwin. See
+`client/macos/README` for installing the IMK bundle.
 
 For more detail please refer to https://github.com/ibus/ibus/wiki/ReadMe .
 

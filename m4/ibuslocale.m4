@@ -8,6 +8,7 @@ datarootdir=`eval echo "$datarootdir"`
 datadir=`eval echo "$datadir"`
 test "x$localedir" = xNONE && localedir="${datadir}/locale"
 ibus_localedir=`eval echo "$localedir"`
+ibus_datadir=`eval echo "$datadir"`
 localedir="$ibus_save_localedir"
 datadir="$ibus_save_datadir"
 datarootdir="$ibus_save_datarootdir"

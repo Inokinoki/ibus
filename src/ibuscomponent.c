@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2019 Red Hat, Inc.
+ * Copyright (C) 2020-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2020 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -362,7 +363,11 @@ ibus_component_serialize (IBusComponent   *component,
     /* serialize observed paths */
     array = g_variant_builder_new (G_VARIANT_TYPE ("av"));
     for (p = component->priv->observed_paths; p != NULL; p = p->next) {
-        g_variant_builder_add (array, "v", ibus_serializable_serialize ((IBusSerializable *)p->data));
+        g_variant_builder_open (array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                array,
+                ibus_serializable_serialize ((IBusSerializable *)p->data));
+        g_variant_builder_close (array);
     }
     g_variant_builder_add (builder, "av", array);
     g_variant_builder_unref (array);
@@ -370,7 +375,11 @@ ibus_component_serialize (IBusComponent   *component,
     /* serialize engine desc list */
     array = g_variant_builder_new (G_VARIANT_TYPE ("av"));
     for (p = component->priv->engines; p != NULL; p = p->next) {
-        g_variant_builder_add (array, "v", ibus_serializable_serialize ((IBusSerializable *)p->data));
+        g_variant_builder_open (array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                array,
+                ibus_serializable_serialize ((IBusSerializable *)p->data));
+        g_variant_builder_close (array);
     }
     g_variant_builder_add (builder, "av", array);
     g_variant_builder_unref (array);
@@ -499,11 +508,7 @@ ibus_component_output (IBusComponent *component,
 
         for (p = component->priv->observed_paths; p != NULL; p = p->next ) {
             IBusObservedPath *path = (IBusObservedPath *) p->data;
-
-            g_string_append_indent (output, indent + 2);
-            g_string_append_printf (output, "<path mtime=\"%ld\" >%s</path>\n",
-                                    path->mtime,
-                                    path->path);
+            ibus_observed_path_output (path, output, indent + 2);
         }
 
         g_string_append_indent (output, indent + 1);
@@ -614,7 +619,9 @@ ibus_component_parse_engines (IBusComponent *component,
 
     if (exec != NULL) {
         gchar *output = NULL;
-        if (g_spawn_command_line_sync (exec, &output, NULL, NULL, NULL)) {
+        gchar *errput = NULL;
+        GError *error = NULL;
+        if (g_spawn_command_line_sync (exec, &output, &errput, NULL, &error)) {
             engines_node = ibus_xml_parse_buffer (output);
             g_free (output);
 
@@ -623,6 +630,15 @@ ibus_component_parse_engines (IBusComponent *component,
                     node = engines_node;
                 }
             }
+            if (errput) {
+                g_warning ("Engines exec:%s is failed: %s", exec, errput);
+                g_free (errput);
+            }
+        } else {
+            g_warning ("Engines exec:%s is failed: %s: %s",
+                       exec, errput ? errput : "(null)", error->message);
+            g_error_free (error);
+            g_free (errput);
         }
     }
 
@@ -713,7 +729,7 @@ ibus_component_new_varargs (const gchar *first_property_name, ...)
 {
     va_list var_args;
     IBusComponent *component;
-    IBusComponentPrivate *priv;
+    G_GNUC_UNUSED IBusComponentPrivate *priv;
 
     g_assert (first_property_name);
 

@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2018 Red Hat, Inc.
+ * Copyright (C) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2025 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -38,12 +38,6 @@
  */
 
 #include <glib.h>
-
-#ifdef IBUS_DISABLE_DEPRECATION_WARNINGS
-#define IBUS_DEPRECATED
-#else
-#define IBUS_DEPRECATED G_DEPRECATED
-#endif
 
 /**
  * IBUS_SERVICE_IBUS:
@@ -211,7 +205,7 @@ G_BEGIN_DECLS
  *
  * Obtains the machine UUID of the machine this process is running on.
  *
- * Returns: A newly allocated string that shows the UUID of the machine.
+ * Returns: A const string that shows the UUID of the machine.
  */
 const gchar     *ibus_get_local_machine_id
                                         (void);
@@ -265,9 +259,21 @@ void             ibus_write_address     (const gchar    *address);
  *    <listitem><para>Environment variable LNAME</para></listitem>
  * </orderedlist>
  *
- * Returns: A newly allocated string that stores current user name.
+ * Returns: A const string that stores current user name.
  */
 const gchar     *ibus_get_user_name     (void);
+
+/**
+ * ibus_get_group_name:
+ *
+ * Get the current user group name.
+ *
+ * Returns: A const string that stores current user group name.
+ *
+ * Since: 1.5.34
+ * Stability: Unstable
+ */
+const gchar     *ibus_get_group_name    (void);
 
 /**
  * ibus_get_daemon_uid:
@@ -286,7 +292,7 @@ glong            ibus_get_daemon_uid    (void) G_GNUC_DEPRECATED;
  *
  * Get the path of socket file.
  *
- * Returns: A newly allocated string that stores the path of socket file.
+ * Returns: A const string that stores the path of socket file.
  */
 const gchar     *ibus_get_socket_path   (void);
 
@@ -333,8 +339,8 @@ gchar           *ibus_key_event_to_string
 /**
  * ibus_key_event_from_string:
  * @string: Key event string.
- * @keyval: Variable that hold key symbol result.
- * @modifiers: Variable that hold modifiers result.
+ * @keyval: (out): Variable that hold key symbol result.
+ * @modifiers: (out): Variable that hold modifiers result.
  *
  * Parse key event string and return key symbol and modifiers.
  *

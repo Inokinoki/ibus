@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ibuskeysyms.h"
-#include "keyname-table.h"
+#include "keynamesprivate.h"
 #include "ibuskeys.h"
 
 #define IBUS_NUM_KEYS G_N_ELEMENTS (gdk_keys_by_keyval)
@@ -47,12 +47,7 @@ ibus_keyval_name (guint keyval)
   static gchar buf[100];
   gdk_key *found;
 
-  /* Check for directly encoded 24-bit UCS characters: */
-  if ((keyval & 0xff000000) == 0x01000000)
-    {
-      g_sprintf (buf, "U+%.04X", (keyval & 0x00ffffff));
-      return buf;
-    }
+  /* <ohorn> with 0x01000000 is supported in gdk_keys_by_keyval */
 
   found = bsearch (&keyval, gdk_keys_by_keyval,
                    IBUS_NUM_KEYS, sizeof (gdk_key),

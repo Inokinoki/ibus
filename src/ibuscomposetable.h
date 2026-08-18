@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2013-2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2013-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2013-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,8 +23,19 @@
 #ifndef __IBUS_COMPOSETABLE_H_
 #define __IBUS_COMPOSETABLE_H_
 
-#include <glib.h>
+/**
+ * SECTION: ibuscomposetable
+ * @short_description: Compose table handling based on libX11
+ * @title: IBusComposeTable
+ * @stability: Unstable
+ *
+ * Generate #IBusComposeTableEx with the compose file or array.
+ *
+ * see_also: #IBusEngineSimple
+ *
+ */
 
+#include <glib.h>
 
 G_BEGIN_DECLS
 
@@ -46,33 +57,38 @@ struct _IBusComposeTable
 struct _IBusComposeTableEx
 {
     IBusComposeTablePrivate *priv;
-    guint16 *data;
+    /* @data is const value to accept mmap data and the releasable allocation
+     * is assigned to @rawdata. */
+    const guint16 *data;
     gint max_seq_len;
     gint n_seqs;
     guint32 id;
+    char *rawdata;
+    gboolean can_load_en_us;
+    gboolean is_system;
 };
 
-struct _IBusComposeTableCompact
-{
-    const guint16 *data;
-    gint max_seq_len;
-    gint n_index_size;
-    gint n_index_stride;
-};
 
-struct _IBusComposeTableCompactEx
-{
-    IBusComposeTableCompactPrivate *priv;
-    const guint16 *data;
-    gint max_seq_len;
-    gint n_index_size;
-    gint n_index_stride;
-};
-
+/**
+ * ibus_compose_table_new_with_file:
+ * @compose_file: The path of the compose file
+ * @compose_tables: (nullable): The list of other @IBusComposeTableEx
+ * and the generating @IBusComposeTableEx excludes the compose keys
+ * which are included in the other @IBusComposeTableEx.
+ *
+ * Generate @IBusComposeTableEx from the compose file.
+ *
+ * Returns: @IBusComposeTableEx
+ */
 IBusComposeTableEx *
-                  ibus_compose_table_new_with_file (const gchar *compose_file);
+                  ibus_compose_table_new_with_file (const gchar *compose_file,
+                                                    GSList
+                                                               *compose_tables);
+void               ibus_compose_table_free         (IBusComposeTableEx
+                                                                *compose_table);
 IBusComposeTableEx *
-                  ibus_compose_table_load_cache    (const gchar *compose_file);
+                  ibus_compose_table_load_cache    (const gchar *compose_file,
+                                                    guint16     *saved_version);
 void              ibus_compose_table_save_cache    (IBusComposeTableEx
                                                                 *compose_table);
 GSList *          ibus_compose_table_list_add_array
@@ -84,7 +100,12 @@ GSList *          ibus_compose_table_list_add_array
                                                     gint         n_seqs);
 GSList *          ibus_compose_table_list_add_file (GSList
                                                                 *compose_tables,
-                                                    const gchar *compose_file);
+                                                    const gchar *compose_file,
+                                                    GError     **error);
+GSList *          ibus_compose_table_list_add_table (GSList
+                                                                *compose_tables,
+                                                     IBusComposeTableEx
+                                                                *compose_table);
 
 G_BEGIN_DECLS
 #endif

@@ -1,0 +1,85 @@
+#!/bin/sh
+# -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*-
+# vim:set noet ts=4:
+#
+# ibus - The Input Bus
+#
+# Copyright (c) 2021-2024 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2021 Red Hat, Inc.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+
+PROGNAME=`basename $0`
+TEST_CASE_DIR="@INSTALLEDDIR@"
+MODULE_SH='ibus-desktop-testing-module'
+MODULE_SH_PATH="@LIBEXECDIR@/$MODULE_SH"
+TEST_LOG="test-autostart.log"
+TESTING_RUNNER=""
+
+
+if test -f $MODULE_SH_PATH ; then
+  . $MODULE_SH_PATH
+elif test -f $(dirname $0)/$MODULE_SH ; then
+  . $(dirname $0)/$MODULE_SH
+else
+  echo "Not found $MODULE_SH"
+  exit 1
+fi
+
+
+usage()
+{
+    $ECHO -e \
+"This test suite is called from /etc/xdg/autostart for systemd sessions\n"     \
+"$PROGNAME [OPTIONS…]\n"                                                       \
+"\n"                                                                           \
+"OPTIONS:\n"                                                                   \
+"-h, --help                       This help\n"                                 \
+"-v, --version                    Show version\n"                              \
+"-b, --builddir=BUILDDIR          Set the BUILDDIR\n"                          \
+"-s, --srcdir=SOURCEDIR           Set the SOURCEDIR\n"                         \
+"-V, --verbose                    Verbose log for ibus-daemon\n"               \
+"-t, --tests=\"TESTS...\"           Run TESTS programs which is separated by space\n" \
+"-r, --runner=RUNNER              Run TESTS programs with a test RUNNER.\n"    \
+"                                 RUNNDER = 'gnome', 'default' or ''.\n"       \
+"                                 'default' is an embedded runner.\n"          \
+"                                 '' is no tests.\n"                           \
+"-T, --timeout=TIMEOUT            Set timeout (default TIMEOUT is 300 sec).\n" \
+"-o, --output=OUTPUT_FILE         Output the log to OUTPUT_FILE\n"             \
+"                                 default is $TEST_LOG\n"                      \
+"-O, --result=RESULT_FILE         Output the result to RESULT_FILE\n"          \
+"                                 default is stdout\n"                         \
+"-S, --screendump=DUMP_FILE       Output the screen to DUMP_FILE ('STDOUT' can be stdout)\n" \
+"-e, --envcheck                   Retrieve environment variables\n"            \
+""
+}
+
+
+main()
+{
+    parse_args "$@"
+    init_session
+    check_env
+    #run_monitor
+    save_screen
+    run_test_suite
+    dump_screen_of_test_cases
+    finit
+}
+
+
+# Need to enclose $@ with double quotes not to split the array.
+main "$@"

@@ -16,15 +16,13 @@ struct _BusMatchRule {
     GList *recipients;
 };
 
-int
-main(gint argc, gchar **argv)
+static void
+test (void)
 {
     BusMatchRule *rule, *rule1;
-#if !GLIB_CHECK_VERSION(2,35,0)
-    g_type_init ();
-#endif
 
-    rule = bus_match_rule_new (" type='signal' , interface = 'org.freedesktop.IBus' ");
+    rule = bus_match_rule_new (" type='signal' ,"
+                               " interface = 'org.freedesktop.IBus' ");
     g_assert (rule->message_type == G_DBUS_MESSAGE_TYPE_SIGNAL);
     g_assert (g_strcmp0 (rule->interface, "org.freedesktop.IBus") == 0 );
     g_object_unref (rule);
@@ -55,12 +53,22 @@ main(gint argc, gchar **argv)
     g_object_unref (rule);
     g_object_unref (rule1);
 
-    rule = bus_match_rule_new ("type='method_call',interface='org.freedesktop.IBus ");
+    rule = bus_match_rule_new ("type='method_call',"
+                               "interface='org.freedesktop.IBus ");
     g_assert (rule == NULL);
 
     rule = bus_match_rule_new ("eavesdrop=true");
     g_assert (rule != NULL);
     g_object_unref (rule);
-    
-    return 0;
+}
+
+int
+main (int argc, char *argv[])
+{
+    g_test_init (&argc, &argv, NULL);
+#if !GLIB_CHECK_VERSION(2,35,0)
+    g_type_init ();
+#endif
+    g_test_add_func ("/test-matchrule", test);
+    return g_test_run ();
 }

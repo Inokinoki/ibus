@@ -83,7 +83,11 @@ ibus_prop_list_serialize (IBusPropList    *prop_list,
         IBusProperty *prop = ibus_prop_list_get (prop_list, i);
         if (prop == NULL)
             break;
-        g_variant_builder_add (&array, "v", ibus_serializable_serialize ((IBusSerializable *)prop));
+        g_variant_builder_open (&array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                &array,
+                ibus_serializable_serialize ((IBusSerializable *)prop));
+        g_variant_builder_close (&array);
     }
 
     g_variant_builder_add (builder, "av", &array);

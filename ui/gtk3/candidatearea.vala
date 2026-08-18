@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -23,6 +23,7 @@
 
 class CandidateArea : Gtk.Box {
     private bool m_vertical;
+    private Gtk.Widget m_text_view;
     private Gtk.Label[] m_labels;
     private Gtk.Label[] m_candidates;
     private Gtk.Widget[] m_widgets;
@@ -31,6 +32,8 @@ class CandidateArea : Gtk.Box {
     private uint m_focus_candidate;
     private bool m_show_cursor;
     private ThemedRGBA m_rgba;
+
+    private Pango.Attribute m_language_attribute;
 
     private const string LABELS[] = {
         "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.",
@@ -56,7 +59,18 @@ class CandidateArea : Gtk.Box {
     public CandidateArea(bool vertical) {
         GLib.Object();
         set_vertical(vertical, true);
-        m_rgba = new ThemedRGBA(this);
+        m_text_view = new Gtk.TextView();
+        var style_context = m_text_view.get_style_context();
+        m_rgba = new ThemedRGBA(style_context);
+    }
+
+    ~CandidateArea() {
+        m_ibus_candidates = null;
+        m_labels = null;
+        m_candidates = null;
+        m_widgets = null;
+        m_rgba = null;
+        m_text_view = null;
     }
 
     public bool candidate_scrolled(Gdk.EventScroll event) {
@@ -67,6 +81,7 @@ class CandidateArea : Gtk.Box {
         case Gdk.ScrollDirection.DOWN:
             cursor_down();
             break;
+        default: break;
         }
         return true;
     }
@@ -102,6 +117,10 @@ class CandidateArea : Gtk.Box {
             m_labels[i].set_text(LABELS[i]);
     }
 
+    public void set_language(Pango.Attribute language_attribute) {
+        m_language_attribute = language_attribute.copy();
+    }
+
     public void set_candidates(IBus.Text[] candidates,
                                uint focus_candidate = 0,
                                bool show_cursor = true) {
@@ -115,6 +134,7 @@ class CandidateArea : Gtk.Box {
             bool visible = false;
             if (i < candidates.length) {
                 Pango.AttrList attrs = get_pango_attr_list_from_ibus_text(candidates[i]);
+                attrs.change(m_language_attribute.copy());
                 if (i == focus_candidate && show_cursor) {
                     Pango.Attribute pango_attr = Pango.attr_foreground_new(
                             (uint16)(m_rgba.selected_fg.red * uint16.MAX),

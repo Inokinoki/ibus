@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright (C) 2008-2019 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -265,7 +265,7 @@ ibus_service_class_init (IBusServiceClass *class)
                         "The connection of service object",
                         G_TYPE_DBUS_CONNECTION,
                         G_PARAM_READWRITE |
-                        G_PARAM_CONSTRUCT_ONLY |
+                        G_PARAM_CONSTRUCT |
                         G_PARAM_STATIC_NAME |
                         G_PARAM_STATIC_NICK |
                         G_PARAM_STATIC_BLURB)
@@ -304,6 +304,7 @@ ibus_service_set_property (IBusService  *service,
         service->priv->object_path = g_value_dup_string (value);
         break;
     case PROP_CONNECTION:
+        g_return_if_fail (!service->priv->connection);
         service->priv->connection = g_value_dup_object (value);
         break;
     default:
@@ -370,8 +371,9 @@ ibus_service_service_method_call (IBusService           *service,
     g_dbus_method_invocation_return_error (invocation,
                                            G_DBUS_ERROR,
                                            G_DBUS_ERROR_UNKNOWN_METHOD,
-                                           "%s::%s", interface_name, method_name);
-    return;
+                                           "%s::%s",
+                                           interface_name, method_name);
+    g_return_if_reached ();
 }
 
 static GVariant *
@@ -383,7 +385,15 @@ ibus_service_service_get_property (IBusService     *service,
                                   const gchar      *property_name,
                                   GError          **error)
 {
-    return NULL;
+    if (error) {
+        *error = NULL;
+        g_set_error (error,
+                     G_DBUS_ERROR,
+                     G_DBUS_ERROR_FAILED,
+                     "service_get_property received an unknown property: %s",
+                     property_name ? property_name : "(null)");
+    }
+    g_return_val_if_reached (NULL);
 }
 
 static gboolean
@@ -396,7 +406,15 @@ ibus_service_service_set_property (IBusService     *service,
                                   GVariant         *value,
                                   GError          **error)
 {
-    return FALSE;
+    if (error) {
+        *error = NULL;
+        g_set_error (error,
+                     G_DBUS_ERROR,
+                     G_DBUS_ERROR_FAILED,
+                     "service_set_property received an unknown property: %s",
+                     property_name ? property_name : "(null)");
+    }
+    g_return_val_if_reached (FALSE);
 }
 
 static void
@@ -477,9 +495,15 @@ ibus_service_unregister_cb (GDBusConnection    *connection,
     guint *p = ids;
     while (*p != 0) {
         g_dbus_connection_unregister_object (connection, *p++);
+        /* g_dbus_connection_register_object(connection) calls
+         * g_object_ref(service).
+         */
+        g_object_unref (service);
     }
     g_signal_handlers_disconnect_by_func (connection,
                     G_CALLBACK (ibus_service_connection_closed_cb), service);
+    /* g_hash_table_insert(service->priv->table) calls g_object_ref(connection)
+     */
     g_object_unref (connection);
     g_free (ids);
 }
@@ -548,12 +572,19 @@ ibus_service_register (IBusService     *service,
 
     array = g_array_new (TRUE, TRUE, sizeof (guint));
     while (*p != NULL) {
+        /* Probably I think @user_data_free_func in
+         * g_dbus_connection_register_object() is not useful in this case
+         * since the free func is not called until the @connection is closed
+         * but the @connection is shared with other instances
+         * so it would be better to call g_object_unref(service)
+         * after g_dbus_connection_unregister_object() is called.
+         */
         guint id = g_dbus_connection_register_object (connection,
                                                       service->priv->object_path,
                                                       *p,
                                                       &ibus_service_interface_vtable,
                                                       g_object_ref (service),
-                                                      (GDestroyNotify)g_object_unref,
+                                                      NULL,
                                                       error);
         if (id != 0) {
             g_array_append_val (array, id);
@@ -576,6 +607,7 @@ error_out:
         guint *ids = (guint*) array->data;
         while (*ids != 0) {
             g_dbus_connection_unregister_object (connection, *ids++);
+            g_object_unref (service);
         }
         g_array_free (array, TRUE);
     }
@@ -643,4 +675,42 @@ ibus_service_class_add_interfaces (IBusServiceClass   *class,
         g_dbus_node_info_unref (introspection_data);
         return TRUE;
     }
+}
+
+int
+ibus_service_class_free_interfaces (IBusServiceClass   *class,
+                                    int                 depth)
+{
+    GDBusInterfaceInfo **interfaces, **p;
+    int i, positive_depth, total = 0;
+
+    g_array_ref (class->interfaces);
+    p = interfaces = (GDBusInterfaceInfo **)class->interfaces->data;
+    for (; *p != NULL; ++p)
+        total++;
+    if (!total)
+        return 0;
+    if (!depth)
+        return total;
+    p = interfaces;
+    positive_depth = (depth > 0) ? depth : -depth;
+    for (i = 0; i < positive_depth; i++) {
+        if (i == total) {
+            g_warning ("The length of GDBusInterfaceInfo is %d but your "
+                       "depth is %d", total, depth);
+            positive_depth = total;
+            break;
+        }
+        if (depth > 0)
+            g_dbus_interface_info_unref (*(p + i));
+        else
+            g_dbus_interface_info_unref (*(p + total - 1 - i));
+    }
+    if (depth > 0) {
+        g_array_remove_range (class->interfaces, 0, positive_depth);
+    } else {
+        g_array_remove_range (class->interfaces,
+                              total - positive_depth, positive_depth);
+    }
+    return i;
 }

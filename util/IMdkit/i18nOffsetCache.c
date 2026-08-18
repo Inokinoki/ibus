@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2014 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2014 Red Hat, Inc.
+ * Copyright (C) 2014-2025 Red Hat, Inc.
  *
  * Permission to use, copy, modify, distribute, and sell this
  * software and its documentation for any purpose is hereby granted
@@ -83,10 +83,13 @@ void _Xi18nSetPropertyOffset (Xi18nOffsetCache *offset_cache, Atom key,
     }
 
     if (++offset_cache->size > offset_cache->capacity) {
+        Xi18nAtomOffsetPair *pair;
         offset_cache->capacity *= OFFSET_CACHE_GROWTH_FACTOR;
-        offset_cache->data = (Xi18nAtomOffsetPair *) realloc (data,
+        pair = (Xi18nAtomOffsetPair *) realloc (data,
                 offset_cache->capacity * sizeof (Xi18nAtomOffsetPair));
-        if (offset_cache->data == NULL) {
+        if (pair) {
+            offset_cache->data = pair;
+        } else {
             offset_cache->data = data;
             --offset_cache->size;
         }
@@ -94,7 +97,7 @@ void _Xi18nSetPropertyOffset (Xi18nOffsetCache *offset_cache, Atom key,
     }
 
     assert (data != NULL);
-    if (offset_cache->size > 0) {
+    if (offset_cache->size > 0 && i < offset_cache->capacity) {
         data[i].key = key;
         data[i].offset = offset;
     }

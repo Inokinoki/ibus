@@ -105,7 +105,15 @@ ibus_lookup_table_serialize (IBusLookupTable *table,
         IBusText *text = ibus_lookup_table_get_candidate (table, i);
         if (text == NULL)
             break;
-        g_variant_builder_add (&array, "v", ibus_serializable_serialize ((IBusSerializable *)text));
+        /* Replaced g_variant_builder_add() with g_variant_builder_open() &
+         * g_variant_builder_close() to avoid creating temporary objects during
+         * serialization.
+         */
+        g_variant_builder_open (&array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                &array,
+                ibus_serializable_serialize ((IBusSerializable *)text));
+        g_variant_builder_close (&array);
     }
     g_variant_builder_add (builder, "av", &array);
 
@@ -116,7 +124,11 @@ ibus_lookup_table_serialize (IBusLookupTable *table,
         if (text == NULL)
             break;
 
-        g_variant_builder_add (&array, "v", ibus_serializable_serialize ((IBusSerializable *)text));
+        g_variant_builder_open (&array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                &array,
+                ibus_serializable_serialize ((IBusSerializable *)text));
+        g_variant_builder_close (&array);
     }
     g_variant_builder_add (builder, "av", &array);
 

@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2015 Red Hat, Inc.
+ * Copyright (C) 2010-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2025 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -29,7 +30,7 @@
 
 /**
  * SECTION: ibustypes
- * @short_description: Generic types for  IBus.
+ * @short_description: Generic types for IBus.
  * @stability: Stable
  *
  * This section consists generic types for IBus, including shift/control key
@@ -107,6 +108,10 @@ typedef enum
  * @IBUS_CAP_PROPERTY: UI is capable to have property.
  * @IBUS_CAP_SURROUNDING_TEXT: Client can provide surround text,
  *  or IME can handle surround text.
+ * @IBUS_CAP_OSK: UI is owned by on-screen keyboard.
+ * @IBUS_CAP_SYNC_PROCESS_KEY: Asynchronous process key events are not
+ *  supported and the ibus_engine_forward_key_event() should not be
+ *  used for the return value of #IBusEngine::process_key_event().
  *
  * Capability flags of UI.
  */
@@ -117,6 +122,9 @@ typedef enum {
     IBUS_CAP_FOCUS              = 1 << 3,
     IBUS_CAP_PROPERTY           = 1 << 4,
     IBUS_CAP_SURROUNDING_TEXT   = 1 << 5,
+    IBUS_CAP_OSK                = 1 << 6,
+    IBUS_CAP_SYNC_PROCESS_KEY   = 1 << 7,
+    IBUS_CAP_SYNC_PROCESS_KEY_V2 = IBUS_CAP_SYNC_PROCESS_KEY,
 } IBusCapabilite;
 
 /**
@@ -223,6 +231,26 @@ struct _IBusRectangle {
 };
 
 /**
+ * IBusRGBA:
+ * @red: Red value.
+ * @green: Green value.
+ * @blue: Blue value.
+ * @alpha: Alpha value.
+ *
+ * RGBA definition.
+ *
+ * Since: 1.5.33
+ * Stability: Unstable
+ */
+typedef struct __IBusRGBA IBusRGBA;
+struct __IBusRGBA {
+    float red;
+    float green;
+    float blue;
+    float alpha;
+};
+
+/**
  * IBusFreeFunc:
  * @object: object to be freed.
  *
@@ -241,29 +269,55 @@ typedef void (* IBusFreeFunc) (gpointer object);
  * @IBUS_INPUT_PURPOSE_EMAIL: Edited field expects email address
  * @IBUS_INPUT_PURPOSE_NAME: Edited field expects the name of a person
  * @IBUS_INPUT_PURPOSE_PASSWORD: Like @IBUS_INPUT_PURPOSE_FREE_FORM,
- * but characters are hidden
+ *     but characters are hidden
  * @IBUS_INPUT_PURPOSE_PIN: Like @IBUS_INPUT_PURPOSE_DIGITS, but
- * characters are hidden
+ *     characters are hidden
+ * @IBUS_INPUT_PURPOSE_TERMINAL: Allow any character, in addition to control
+ *     codes. Since 1.5.24
+ * @IBUS_INPUT_PURPOSE_DATE: Input a date for the Wayland text-input protocol
+ *     V1/V3. Since 1.5.34
+ * @IBUS_INPUT_PURPOSE_TIME: Input a time for the Wayland text-input protocol
+ *     V1/V3. Since 1.5.34
+ * @IBUS_INPUT_PURPOSE_DATETIME: Input a date and time for the Wayland
+ *     text-input protocol V1/V3. Since 1.5.34
  *
  * Describes primary purpose of the input context.  This information
  * is particularly useful to implement intelligent behavior in
  * engines, such as automatic input-mode switch and text prediction.
  *
+ * Note that the purpose is not meant to impose a totally strict rule
+ * about allowed characters, and does not replace input validation.
+ * It is fine for an on-screen keyboard to let the user override the
+ * character set restriction that is expressed by the purpose. The
+ * application is expected to validate the entry contents, even if
+ * it specified a purpose.
+ *
+ * The difference between @IBUS_INPUT_PURPOSE_DIGITS and
+ * @IBUS_INPUT_PURPOSE_NUMBER is that the former accepts only digits
+ * while the latter also some punctuation (like commas or points, plus,
+ * minus) and “e” or “E” as in 3.14E+000.
+ *
  * This enumeration may be extended in the future; engines should
  * interpret unknown values as 'free form'.
+ *
+ * Since: 1.5.4
  */
 typedef enum
 {
-  IBUS_INPUT_PURPOSE_FREE_FORM,
-  IBUS_INPUT_PURPOSE_ALPHA,
-  IBUS_INPUT_PURPOSE_DIGITS,
-  IBUS_INPUT_PURPOSE_NUMBER,
-  IBUS_INPUT_PURPOSE_PHONE,
-  IBUS_INPUT_PURPOSE_URL,
-  IBUS_INPUT_PURPOSE_EMAIL,
-  IBUS_INPUT_PURPOSE_NAME,
-  IBUS_INPUT_PURPOSE_PASSWORD,
-  IBUS_INPUT_PURPOSE_PIN
+    IBUS_INPUT_PURPOSE_FREE_FORM,
+    IBUS_INPUT_PURPOSE_ALPHA,
+    IBUS_INPUT_PURPOSE_DIGITS,
+    IBUS_INPUT_PURPOSE_NUMBER,
+    IBUS_INPUT_PURPOSE_PHONE,
+    IBUS_INPUT_PURPOSE_URL,
+    IBUS_INPUT_PURPOSE_EMAIL,
+    IBUS_INPUT_PURPOSE_NAME,
+    IBUS_INPUT_PURPOSE_PASSWORD,
+    IBUS_INPUT_PURPOSE_PIN,
+    IBUS_INPUT_PURPOSE_TERMINAL,
+    IBUS_INPUT_PURPOSE_DATE,
+    IBUS_INPUT_PURPOSE_TIME,
+    IBUS_INPUT_PURPOSE_DATETIME
 } IBusInputPurpose;
 
 /**
@@ -280,25 +334,105 @@ typedef enum
  *     first word of each sentence
  * @IBUS_INPUT_HINT_INHIBIT_OSK: Suggest to not show an onscreen keyboard
  *     (e.g for a calculator that already has all the keys).
- * @IBUS_INPUT_HINT_VERTICAL_WRITING: The text is vertical.
+ * @IBUS_INPUT_HINT_VERTICAL_WRITING: The text is vertical. Since 1.5.11
+ * @IBUS_INPUT_HINT_EMOJI: Suggest offering Emoji support. Since 1.5.24
+ * @IBUS_INPUT_HINT_NO_EMOJI: Suggest not offering Emoji support. Since 1.5.24
+ * @IBUS_INPUT_HINT_PRIVATE: Request that the input method should not
+ *     update personalized data (like typing history). Since 1.5.26
+ * @IBUS_INPUT_HINT_HIDDEN_TEXT: The text is hidden (e.g. password fields).
+ *     Since 1.5.34
+ * @IBUS_INPUT_HINT_LATIN: Just latin characters should be entered for the
+ *     text-input protocol V1/V3. Since 1.5.34
+ * @IBUS_INPUT_HINT_MULTILINE: Suggest the text input is multiline for the
+ *     text-input protocol V1/V3. Since 1.5.34
  *
  * Describes hints that might be taken into account by engines.  Note
  * that engines may already tailor their behaviour according to the
  * #IBusInputPurpose of the entry.
+ *
+ * Some common sense is expected when using these flags - mixing
+ * @IBUS_INPUT_HINT_LOWERCASE with any of the uppercase hints makes no sense.
+ *
+ * This enumeration may be extended in the future; engines should
+ * ignore unknown values.
+ *
+ * Since: 1.5.4
  */
 typedef enum
 {
-  IBUS_INPUT_HINT_NONE                = 0,
-  IBUS_INPUT_HINT_SPELLCHECK          = 1 << 0,
-  IBUS_INPUT_HINT_NO_SPELLCHECK       = 1 << 1,
-  IBUS_INPUT_HINT_WORD_COMPLETION     = 1 << 2,
-  IBUS_INPUT_HINT_LOWERCASE           = 1 << 3,
-  IBUS_INPUT_HINT_UPPERCASE_CHARS     = 1 << 4,
-  IBUS_INPUT_HINT_UPPERCASE_WORDS     = 1 << 5,
-  IBUS_INPUT_HINT_UPPERCASE_SENTENCES = 1 << 6,
-  IBUS_INPUT_HINT_INHIBIT_OSK         = 1 << 7,
-  IBUS_INPUT_HINT_VERTICAL_WRITING    = 1 << 8
+    IBUS_INPUT_HINT_NONE                = 0,
+    IBUS_INPUT_HINT_SPELLCHECK          = 1 << 0,
+    IBUS_INPUT_HINT_NO_SPELLCHECK       = 1 << 1,
+    IBUS_INPUT_HINT_WORD_COMPLETION     = 1 << 2,
+    IBUS_INPUT_HINT_LOWERCASE           = 1 << 3,
+    IBUS_INPUT_HINT_UPPERCASE_CHARS     = 1 << 4,
+    IBUS_INPUT_HINT_UPPERCASE_WORDS     = 1 << 5,
+    IBUS_INPUT_HINT_UPPERCASE_SENTENCES = 1 << 6,
+    IBUS_INPUT_HINT_INHIBIT_OSK         = 1 << 7,
+    IBUS_INPUT_HINT_VERTICAL_WRITING    = 1 << 8,
+    IBUS_INPUT_HINT_EMOJI               = 1 << 9,
+    IBUS_INPUT_HINT_NO_EMOJI            = 1 << 10,
+    IBUS_INPUT_HINT_PRIVATE             = 1 << 11,
+    IBUS_INPUT_HINT_HIDDEN_TEXT         = 1 << 12,
+    IBUS_INPUT_HINT_LATIN               = 1 << 13,
+    IBUS_INPUT_HINT_MULTILINE           = 1 << 14
 } IBusInputHints;
 
-#endif
+/**
+ * IBUS_MODIFIER_FILTER:
+ *
+ * This is a filter for shortcut keys.
+ * Since: 1.5.32
+ */
+#define IBUS_MODIFIER_FILTER                    \
+       (IBUS_MODIFIER_MASK & ~(                 \
+        IBUS_LOCK_MASK |  /* Caps Lock */       \
+        IBUS_MOD2_MASK |  /* Num Lock */        \
+        IBUS_BUTTON1_MASK |                     \
+        IBUS_BUTTON2_MASK |                     \
+        IBUS_BUTTON3_MASK |                     \
+        IBUS_BUTTON4_MASK |                     \
+        IBUS_BUTTON5_MASK |                     \
+        IBUS_SUPER_MASK |                       \
+        IBUS_HYPER_MASK |                       \
+        IBUS_META_MASK))
 
+/**
+ * IBusMessageDomain:
+ * @IBUS_MESSAGE_ENGINE: The message domain for Engine messages
+ * @IBUS_MESSAGE_PANEL: The message domain for Panel messages
+ *
+ * Since: 1.5.33
+ * Stability: Unstable
+ */
+typedef enum
+{
+  IBUS_MESSAGE_DOMAIN_NONE,
+  IBUS_MESSAGE_DOMAIN_ENGINE,
+  IBUS_MESSAGE_DOMAIN_PANEL
+} IBusMessageDomain;
+
+/**
+ * IBusPreeditFormat:
+ * @IBUS_PREEDIT_FORMAT_RGBA: Use #IBusAttribute with the RGBA.
+ *         This has been a default usage and ibus_attribute_get_attr_type()
+ *         returns @IBUS_ATTR_TYPE_UNDERLINE, @IBUS_ATTR_TYPE_FOREGROUND,
+ *         @IBUS_ATTR_TYPE_BACKGROUND.
+ * @IBUS_PREEDIT_FORMAT_HINT: Use #IBusAttribute with the hints.
+ *         This let #IBusPanelService decides the actual RGBA values to follow
+ *         the current desktop theme and ibus_attribute_get_attr_type()
+ *         returns @IBUS_ATTR_TYPE_HINT.
+ *
+ * You can set the "preedit-format" property of the constructor of
+ * #IBusInputContext or #IBusPanelService.
+ *
+ * Since: 1.5.33
+ * Stability: Unstable
+ */
+typedef enum
+{
+    IBUS_PREEDIT_FORMAT_RGBA,
+    IBUS_PREEDIT_FORMAT_HINT,
+} IBusPreeditFormat;
+
+#endif

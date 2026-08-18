@@ -2,6 +2,8 @@
  
          Copyright 1994, 1995 by Sun Microsystems, Inc.
          Copyright 1993, 1994 by Hewlett-Packard Company
+         Copyright (C) 2008-2025 Red Hat, Inc.
+         Copyright (C) 2018-2025 Takao Fujiwara
  
 Permission to use, copy, modify, distribute, and sell this software
 and its documentation for any purpose is hereby granted without fee,
@@ -36,6 +38,8 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #endif
 #include <X11/Xproto.h>
 #undef NEED_EVENTS
+#include <assert.h>
+
 #include "FrameMgr.h"
 #include "IMdkit.h"
 #include "Xi18n.h"
@@ -89,7 +93,7 @@ TransportSW _TransR[] =
 #ifdef DNETCONN
     {"decnet",          6, _Xi18nCheckTransAddress},
 #endif
-    {(char *) NULL,     0, (Bool (*) ()) NULL}
+    {(char *) NULL,     0, (Bool (*) (Xi18n, TransportSW *, char *))NULL}
 };
 
 static Bool GetInputStyles (Xi18n i18n_core, XIMStyles **p_style)
@@ -166,8 +170,14 @@ static Bool GetEncodings(Xi18n i18n_core, XIMEncodings **p_encoding)
     {
         (*p_encoding)->supported_encodings[i]
             = (char *) malloc (strlen (p->supported_encodings[i]) + 1);
-        strcpy ((*p_encoding)->supported_encodings[i],
-                p->supported_encodings[i]);
+        if (!((*p_encoding)->supported_encodings[i])) {
+            fprintf (stderr, "(XIM-IMdkit) WARNING: malloc failed in %s:%d.\n",
+                     __FILE__, __LINE__);
+
+        } else {
+            strcpy ((*p_encoding)->supported_encodings[i],
+                    p->supported_encodings[i]);
+        }
     }
     /*endif*/
     return True;
@@ -187,7 +197,14 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 if (address->imvalue_mask & I18N_IM_LOCALE)
                     return IMLocale;
                 /*endif*/
-                address->im_locale = (char *) malloc (strlen (p->value) + 1);
+                /* xi18n_setup() initialize the `address` structure with 0 and
+                 * the pointer of the `address` is not changed and
+                 * `address->imvalue_mask` should avoid the reallocation so
+                 * the `-Wanalyzer-malloc-leak` flag in GCC 11.0.1 should not
+                 * warn about leaks of CWE-401.
+                 */
+                assert (!address->im_locale);
+                address->im_locale = (char *)malloc (strlen (p->value) + 1);
                 if (!address->im_locale)
                     return IMLocale;
                 /*endif*/
@@ -199,7 +216,8 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 if (address->imvalue_mask & I18N_IM_ADDRESS)
                     return IMServerTransport;
                 /*endif*/
-                address->im_addr = (char *) malloc (strlen (p->value) + 1);
+                assert (!address->im_addr);
+                address->im_addr = (char *)malloc (strlen (p->value) + 1);
                 if (!address->im_addr)
                     return IMServerTransport;
                 /*endif*/
@@ -211,7 +229,8 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 if (address->imvalue_mask & I18N_IM_NAME)
                     return IMServerName;
                 /*endif*/
-                address->im_name = (char *) malloc (strlen (p->value) + 1);
+                assert (!address->im_name);
+                address->im_name = (char *)malloc (strlen (p->value) + 1);
                 if (!address->im_name)
                     return IMServerName;
                 /*endif*/
@@ -223,7 +242,7 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 if (address->imvalue_mask & I18N_IMSERVER_WIN)
                     return IMServerWindow;
                 /*endif*/
-                address->im_window = (Window) p->value;
+                address->im_window = (Window)p->value;
                 address->imvalue_mask |= I18N_IMSERVER_WIN;
             }
             else if (strcmp (p->name, IMInputStyles) == 0)
@@ -233,19 +252,21 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 /*endif*/
                 address->input_styles.count_styles =
                     ((XIMStyles*)p->value)->count_styles;
-                address->input_styles.supported_styles =
-                    (XIMStyle *) malloc (sizeof (XIMStyle)*address->input_styles.count_styles);
-                if (address->input_styles.supported_styles == (XIMStyle *) NULL)
+                assert (!address->input_styles.supported_styles);
+                address->input_styles.supported_styles = (XIMStyle *)malloc (
+                        sizeof (XIMStyle) * address->input_styles.count_styles);
+                if (address->input_styles.supported_styles == (XIMStyle *)NULL)
                     return IMInputStyles;
                 /*endif*/
                 memmove (address->input_styles.supported_styles,
-                         ((XIMStyles *) p->value)->supported_styles,
-                         sizeof (XIMStyle)*address->input_styles.count_styles);
+                         ((XIMStyles *)p->value)->supported_styles,
+                         sizeof (XIMStyle) *
+                                 address->input_styles.count_styles);
                 address->imvalue_mask |= I18N_INPUT_STYLES;
             }
             else if (strcmp (p->name, IMProtocolHandler) == 0)
             {
-                address->improto = (IMProtoHandler) p->value;
+                address->improto = (IMProtoHandler)p->value;
                 address->imvalue_mask |= I18N_IM_HANDLER;
             }
             else if (strcmp (p->name, IMOnKeysList) == 0)
@@ -254,15 +275,16 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                     return IMOnKeysList;
                 /*endif*/
                 address->on_keys.count_keys =
-                    ((XIMTriggerKeys *) p->value)->count_keys;
-                address->on_keys.keylist =
-                    (XIMTriggerKey *) malloc (sizeof (XIMTriggerKey)*address->on_keys.count_keys);
-                if (address->on_keys.keylist == (XIMTriggerKey *) NULL)
+                    ((XIMTriggerKeys *)p->value)->count_keys;
+                assert (!address->on_keys.keylist);
+                address->on_keys.keylist = (XIMTriggerKey *)malloc (
+                        sizeof (XIMTriggerKey) * address->on_keys.count_keys);
+                if (address->on_keys.keylist == (XIMTriggerKey *)NULL)
                     return IMOnKeysList;
                 /*endif*/
                 memmove (address->on_keys.keylist,
-                         ((XIMTriggerKeys *) p->value)->keylist,
-                         sizeof (XIMTriggerKey)*address->on_keys.count_keys);
+                         ((XIMTriggerKeys *)p->value)->keylist,
+                         sizeof (XIMTriggerKey) * address->on_keys.count_keys);
                 address->imvalue_mask |= I18N_ON_KEYS;
             }
             else if (strcmp (p->name, IMOffKeysList) == 0)
@@ -271,15 +293,16 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                     return IMOffKeysList;
                 /*endif*/
                 address->off_keys.count_keys =
-                    ((XIMTriggerKeys *) p->value)->count_keys;
-                address->off_keys.keylist =
-                    (XIMTriggerKey *) malloc (sizeof (XIMTriggerKey)*address->off_keys.count_keys);
-                if (address->off_keys.keylist == (XIMTriggerKey *) NULL)
+                    ((XIMTriggerKeys *)p->value)->count_keys;
+                assert (!address->off_keys.keylist);
+                address->off_keys.keylist = (XIMTriggerKey *)malloc (
+                        sizeof (XIMTriggerKey) * address->off_keys.count_keys);
+                if (address->off_keys.keylist == (XIMTriggerKey *)NULL)
                     return IMOffKeysList;
                 /*endif*/
                 memmove (address->off_keys.keylist,
-                         ((XIMTriggerKeys *) p->value)->keylist,
-                         sizeof (XIMTriggerKey)*address->off_keys.count_keys);
+                         ((XIMTriggerKeys *)p->value)->keylist,
+                         sizeof (XIMTriggerKey) * address->off_keys.count_keys);
                 address->imvalue_mask |= I18N_OFF_KEYS;
             }
             else if (strcmp (p->name, IMEncodingList) == 0)
@@ -289,17 +312,19 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
                 /*endif*/
                 address->encoding_list.count_encodings =
                     ((XIMEncodings *) p->value)->count_encodings;
+                assert (!address->encoding_list.supported_encodings);
                 address->encoding_list.supported_encodings =
-                    (XIMEncoding *) malloc (sizeof (XIMEncoding)*address->encoding_list.count_encodings);
+                        (XIMEncoding *)malloc (sizeof (XIMEncoding) *
+                                address->encoding_list.count_encodings);
                 if (address->encoding_list.supported_encodings
-                    == (XIMEncoding *) NULL)
-                {
+                    == (XIMEncoding *)NULL) {
                     return IMEncodingList;
                 }
                 /*endif*/
                 memmove (address->encoding_list.supported_encodings,
-                         ((XIMEncodings *) p->value)->supported_encodings,
-                         sizeof (XIMEncoding)*address->encoding_list.count_encodings);
+                         ((XIMEncodings *)p->value)->supported_encodings,
+                         sizeof (XIMEncoding) *
+                                 address->encoding_list.count_encodings);
                 address->imvalue_mask |= I18N_ENCODINGS;
             }
             else if (strcmp (p->name, IMFilterEventMask) == 0)
@@ -335,30 +360,38 @@ static char *ParseArgs (Xi18n i18n_core, int mode, XIMArg *args)
     {
         for (p = args;  p->name != NULL;  p++)
         {
+            register char *_p = NULL;
             if (strcmp (p->name, IMLocale) == 0)
             {
-                p->value = (char *) malloc (strlen (address->im_locale) + 1);
-                if (!p->value)
+                _p = (char *)malloc (strlen (address->im_locale) + 1);
+                /* Workaround to avoid the warning of the leak of '*p.value'
+                 * CWE-401 and -Wanalyzer-malloc-leak. Seems GCC does not
+                 * understand the `if (!p->value)` sentence.
+                 */
+                if (!_p)
                     return IMLocale;
                 /*endif*/
+                p->value = _p;
                 strcpy (p->value, address->im_locale);
             }
             else if (strcmp (p->name, IMServerTransport) == 0)
             {
-                p->value = (char *) malloc (strlen (address->im_addr) + 1);
-                if (!p->value)
+                _p = (char *)malloc (strlen (address->im_addr) + 1);
+                if (!_p)
                     return IMServerTransport;
                 /*endif*/
+                p->value = _p;
                 strcpy (p->value, address->im_addr);
             }
             else if (strcmp (p->name, IMServerName) == 0)
             {
                 if (address->imvalue_mask & I18N_IM_NAME)
                 {
-                    p->value = (char *) malloc (strlen (address->im_name) + 1);
-                    if (!p->value)
+                    _p = (char *)malloc (strlen (address->im_name) + 1);
+                    if (!_p)
                         return IMServerName;
                     /*endif*/
+                    p->value = _p;
                     strcpy (p->value, address->im_name);
                 }
                 else
@@ -698,7 +731,7 @@ static void ReturnSelectionNotify (Xi18n i18n_core, XSelectionRequestEvent *ev)
 {
     XEvent event;
     Display *dpy = i18n_core->address.dpy;
-    char buf[4096];
+    char buf[4096] = { '\0', };
 
     event.type = SelectionNotify;
     event.xselection.requestor = ev->requestor;

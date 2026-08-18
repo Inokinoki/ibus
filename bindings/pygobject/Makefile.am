@@ -4,7 +4,7 @@
 #
 # Copyright (c) 2012 Daiki Ueno <ueno@unixuser.org>
 # Copyright (c) 2014-2016 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2018-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2018-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
 # Copyright (c) 2012-2018 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
@@ -27,37 +27,40 @@ NULL =
 if ENABLE_PYTHON2
 py2_compile = PYTHON=$(PYTHON2) $(SHELL) $(py_compile)
 overrides2dir = $(py2overridesdir)
-overrides2_DATA =				\
-	gi/overrides/IBus.py			\
-	$(NULL)
+overrides2_DATA =                               \
+    gi/overrides/IBus.py                        \
+    $(NULL)
 endif
 
 overridesdir = $(pyoverridesdir)
-overrides_PYTHON =				\
-	gi/overrides/IBus.py			\
-	$(NULL)
+overrides_PYTHON =                              \
+    gi/overrides/IBus.py                        \
+    $(NULL)
 
 TESTS =
 
 if ENABLE_TESTS
-TESTS += test-override-ibus.py
+TESTS += test-deserialize.py test-override-ibus.py
 endif
 
 # IBus.Keymap() accesses keymap files
 TESTS_ENVIRONMENT = \
-	PYTHONPATH=$(top_srcdir)/tests:$${PYTHONPATH:+:$$PYTHONPATH} \
-	LD_LIBRARY_PATH=$(top_builddir)/src/.libs:$$LD_LIBRARY_PATH \
-	GI_TYPELIB_PATH=$(top_builddir)/src:$$GI_TYPELIB_PATH \
-	IBUS_KEYMAP_PATH=$(top_srcdir)/data/keymaps \
-	$(NULL)
+    top_srcdir=$(top_srcdir) \
+    PYTHONPATH=$(abs_top_srcdir)/tests:$${PYTHONPATH:+:$$PYTHONPATH} \
+    PYTHONMALLOC=malloc \
+    LD_LIBRARY_PATH=$(abs_top_builddir)/src/.libs:$$LD_LIBRARY_PATH \
+    GI_TYPELIB_PATH=$(abs_top_builddir)/src:$$GI_TYPELIB_PATH \
+    IBUS_KEYMAP_PATH=$(abs_top_srcdir)/data/keymaps \
+    $(NULL)
 
-LOG_COMPILER = $(PYTHON) -B
+LOG_COMPILER = $(top_srcdir)/src/tests/runtest $(PYTHON)
 
-EXTRA_DIST =					\
-	gi/__init__.py				\
-	gi/overrides/__init__.py		\
-	test-override-ibus.py                   \
-	$(NULL)
+EXTRA_DIST =                                    \
+    gi/__init__.py                              \
+    gi/overrides/__init__.py                    \
+    test-deserialize.py                         \
+    test-override-ibus.py                       \
+    $(NULL)
 
 install-data-hook:
 	@$(NORMAL_INSTALL)

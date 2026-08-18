@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2018 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2018-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -67,22 +67,36 @@ class ExtensionGtk : Gtk.Application {
 
 
     private void bus_name_acquired_cb(DBusConnection connection,
-                                      string sender_name,
-                                      string object_path,
-                                      string interface_name,
-                                      string signal_name,
-                                      Variant parameters) {
+                                      string?        sender_name,
+                                      string         object_path,
+                                      string         interface_name,
+                                      string         signal_name,
+                                      Variant        parameters) {
         debug("signal_name = %s", signal_name);
+        /* rhbz#1797120 Fix assert(bus.is_connected()) in
+         * panel_binding_construct()
+         */
+        return_if_fail(m_bus.is_connected());
+        if (m_panel != null) {
+            // ibus_object_destroy() is needed because g_object_unref() is
+            // called by ibus_service_unregister_cb() but another
+            // g_object_unref() is also called by g_object_run_dispose()
+            // and one g_object_unref() is not needed because Vala calls it
+            // with `m_panel = null`.
+            m_panel.ref();
+            ((IBus.Object)m_panel).destroy();
+            m_panel.disconnect_signals();
+        }
         m_panel = new PanelBinding(m_bus, this);
         m_panel.load_settings();
     }
 
     private void bus_name_lost_cb(DBusConnection connection,
-                                  string sender_name,
-                                  string object_path,
-                                  string interface_name,
-                                  string signal_name,
-                                  Variant parameters) {
+                                  string?        sender_name,
+                                  string         object_path,
+                                  string         interface_name,
+                                  string         signal_name,
+                                  Variant        parameters) {
         // "Destroy" dbus method was called before this callback is called.
         // "Destroy" dbus method -> ibus_service_destroy()
         // -> g_dbus_connection_unregister_object()
@@ -91,14 +105,17 @@ class ExtensionGtk : Gtk.Application {
         // g_dbus_connection_register_object()
         debug("signal_name = %s", signal_name);
 
-        // unref m_panel
+        m_panel.ref();
+        ((IBus.Object)m_panel).destroy();
         m_panel.disconnect_signals();
+        // unref m_panel
         m_panel = null;
     }
 
     private void bus_disconnected(IBus.Bus bus) {
         debug("connection is lost.");
         Gtk.main_quit();
+        this.quit();
     }
 
     private void bus_connected(IBus.Bus bus) {

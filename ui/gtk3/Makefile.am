@@ -3,8 +3,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2015 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2015-2019 Takao Fujwiara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2019 Red Hat, Inc.
+# Copyright (c) 2015-2025 Takao Fujwiara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2025 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -24,10 +24,11 @@
 NULL =
 
 libibus = $(top_builddir)/src/libibus-@IBUS_API_VERSION@.la
+libibuswaylandim = $(top_builddir)/client/wayland/libibuswaylandim.la
 
 component_DATA = \
-	gtkpanel.xml \
-	$(NULL)
+    gtkpanel.xml \
+    $(NULL)
 componentdir = $(pkgdatadir)/component
 
 %.xml: %.xml.in
@@ -35,90 +36,133 @@ componentdir = $(pkgdatadir)/component
 		-e 's|@VERSION[@]|$(VERSION)|g' \
 		-e 's|@libexecdir[@]|$(libexecdir)|g' $< > $@.tmp && \
 		mv $@.tmp $@
+	$(NULL)
+%.desktop: %.desktop.in
+	$(AM_V_GEN) sed \
+		-e 's|@libexecdir[@]|$(libexecdir)|g' \
+		-e 's|^#Name=|Name=|' $< > $@.tmp && \
+		mv $@.tmp $@
+	$(NULL)
 
 # force include config.h before gi18n.h.
 AM_CPPFLAGS = \
-	-I$(top_srcdir)/src \
-	-I$(top_builddir)/src \
-	-include $(CONFIG_HEADER) \
-	$(NULL)
+    -I$(top_srcdir)/src \
+    -I$(top_builddir)/src \
+    -include $(CONFIG_HEADER) \
+    $(NULL)
 
 AM_CFLAGS = \
-	@GLIB2_CFLAGS@ \
-	@GIO2_CFLAGS@ \
-	@GTHREAD2_CFLAGS@ \
-	@GTK3_CFLAGS@ \
-	@X11_CFLAGS@ \
-	-DG_LOG_DOMAIN=\"IBUS\" \
-	-DBINDIR=\"$(bindir)\" \
-	-DPKGDATADIR=\"$(pkgdatadir)\" \
-	-DIBUS_DISABLE_DEPRECATED \
-	-Wno-unused-variable \
-	-Wno-unused-but-set-variable \
-	-Wno-unused-function \
-	$(NULL)
+    @GLIB2_CFLAGS@ \
+    @GIO2_CFLAGS@ \
+    @GTHREAD2_CFLAGS@ \
+    @GTK3_CFLAGS@ \
+    -DG_LOG_DOMAIN=\"IBUS\" \
+    -DBINDIR=\"$(bindir)\" \
+    -DPKGDATADIR=\"$(pkgdatadir)\" \
+    -DIBUS_DISABLE_DEPRECATED \
+    -Wno-unused-variable \
+    -Wno-unused-but-set-variable \
+    -Wno-unused-function \
+    $(NULL)
 
 AM_LDADD = \
-	@GOBJECT2_LIBS@ \
-	@GLIB2_LIBS@ \
-	@GIO2_LIBS@ \
-	@GTHREAD2_LIBS@ \
-	@GTK3_LIBS@ \
-	@X11_LIBS@ \
-	-lXi \
-	$(libibus) \
-	$(NULL)
+    @GOBJECT2_LIBS@ \
+    @GLIB2_LIBS@ \
+    @GIO2_LIBS@ \
+    @GTHREAD2_LIBS@ \
+    @GTK3_LIBS@ \
+    $(libibus) \
+    $(NULL)
 
 AM_VALAFLAGS = \
-	--vapidir=$(top_builddir)/bindings/vala \
-	--vapidir=$(top_srcdir)/bindings/vala \
-	--pkg=posix \
-	--pkg=gtk+-3.0 \
-	--pkg=gdk-x11-3.0 \
-	--pkg=ibus-1.0 \
-	--pkg=config \
-	--pkg=xi \
-	--target-glib="$(VALA_TARGET_GLIB_VERSION)" \
-	$(NULL)
-
-if ENABLE_APPINDICATOR
-AM_VALAFLAGS += --define=INDICATOR
-endif
-
-if ENABLE_APPINDICATOR_ENGINE_ICON
-AM_VALAFLAGS += --define=INDICATOR_ENGINE_ICON
-endif
-
-if ENABLE_GDK3_WAYLAND
-AM_VALAFLAGS += --pkg=gdk-wayland --define=USE_GDK_WAYLAND
-endif
+    --vapidir=$(top_builddir)/bindings/vala \
+    --vapidir=$(top_srcdir)/bindings/vala \
+    --pkg=posix \
+    --pkg=gtk+-3.0 \
+    --pkg=ibus-1.0 \
+    --pkg=config \
+    --pkg=glibmacro \
+    --pkg-config="\"$(PKG_CONFIG) --with-path=$(PKG_CONFIG_PATH)\"" \
+    --target-glib="$(VALA_TARGET_GLIB_VERSION)" \
+    $(NULL)
 
 libexec_PROGRAMS = ibus-ui-gtk3
 
 ibus_ui_gtk3_SOURCES = \
-	application.vala \
-	bindingcommon.vala \
-	candidatearea.vala \
-	candidatepanel.vala \
-	emojier.vala \
-	handle.vala \
-	iconwidget.vala \
-	indicator.vala \
-	keybindingmanager.vala \
-	panel.vala \
-	pango.vala \
-	property.vala \
-	propertypanel.vala \
-	separator.vala \
-	switcher.vala \
-	xkblayout.vala \
-	gen-notification-item.xml.c \
-	gen-notification-watcher.xml.c \
-	$(NULL)
+    application.vala \
+    bindingcommon.vala \
+    candidatearea.vala \
+    candidatepanel.vala \
+    emojier.vala \
+    handle.vala \
+    iconwidget.vala \
+    keybindingmanager.vala \
+    message.vala \
+    panel.vala \
+    pango.vala \
+    property.vala \
+    propertypanel.vala \
+    separator.vala \
+    switcher.vala \
+    xkblayout.vala \
+    gen-notification-item.xml.c \
+    gen-notification-watcher.xml.c \
+    $(NULL)
 
 ibus_ui_gtk3_LDADD = \
-	$(AM_LDADD) \
-	$(NULL)
+    $(AM_LDADD) \
+    $(NULL)
+
+if ENABLE_XIM
+AM_CFLAGS += \
+    @X11_CFLAGS@ \
+    $(NULL)
+
+AM_LDADD += \
+    @X11_LIBS@ \
+    -lXi \
+    $(NULL)
+
+AM_VALAFLAGS += \
+    --pkg=gdk-x11-3.0 \
+    --pkg=xi \
+    -D ENABLE_XIM \
+    $(NULL)
+endif
+
+if ENABLE_LIBNOTIFY
+AM_CFLAGS += \
+       @LIBNOTIFY_CFLAGS@ \
+       $(NULL)
+
+AM_LDADD += \
+       @LIBNOTIFY_LIBS@ \
+       $(NULL)
+
+AM_VALAFLAGS += \
+       --pkg=libnotify \
+       -D ENABLE_LIBNOTIFY \
+       $(NULL)
+endif
+
+if ENABLE_APPINDICATOR
+AM_VALAFLAGS += \
+    --define=INDICATOR \
+    --pkg=Dbusmenu-0.4 \
+    --pkg=DbusmenuGtk3-0.4 \
+    $(NULL)
+AM_CFLAGS += \
+    @DBUSMENU_GLIB_CFLAGS@ \
+    @DBUSMENU_GTK3_CFLAGS@ \
+    $(NULL)
+AM_LDADD += \
+    @DBUSMENU_GLIB_LIBS@ \
+    @DBUSMENU_GTK3_LIBS@ \
+    $(NULL)
+ibus_ui_gtk3_SOURCES += \
+    indicator.vala \
+    $(NULL)
+endif
 
 gen-%.xml.c: %.xml
 	echo "Building $@ from $<"
@@ -126,17 +170,26 @@ gen-%.xml.c: %.xml
 	sed -e "s:\":\\\\\":g" -e s:^:\": -e s:\$$:\\\\n\": $< >> $@
 	echo ";" >> $@
 
-CLEANFILES =            \
-    gtkpanel.xml        \
-    $(NULL)
-
-MAINTAINERCLEANFILES =
-
 emoji_headers =         \
     ibusemojidialog.h   \
     $(NULL)
 
-man_seven_in_files = ibus-emoji.7.in
+desktop_in_files = \
+    ibus-ui-emojier.desktop.in \
+    ibus-ui-wayland.desktop.in \
+    ibus-extension-gtk3.desktop.in \
+    $(NULL)
+desktop_notrans_files = $(desktop_in_files:.desktop.in=.desktop)
+desktopdir = $(datadir)/applications
+desktop_DATA =
+
+CLEANFILES =            \
+    $(desktop_notrans_files) \
+    $(desktop_DATA)     \
+    gtkpanel.xml        \
+    $(NULL)
+
+MAINTAINERCLEANFILES =
 
 # References:
 # libappindicator/src/notification-item.xml
@@ -145,17 +198,37 @@ man_seven_in_files = ibus-emoji.7.in
 # kdelibs/kdeui/knotifications/src/org.kde.StatusNotifierWatcher.xml
 EXTRA_DIST =                            \
     $(emoji_headers)                    \
-    $(man_seven_in_files)               \
+    $(desktop_in_files)                 \
     emojierapp.vala                     \
     extension.vala                      \
     gtkextension.xml.in                 \
     gtkpanel.xml.in                     \
     notification-item.xml               \
     notification-watcher.xml            \
-    ibus-ui-emojier.desktop.in          \
-    ibus-extension-gtk3.desktop.in      \
     panelbinding.vala                   \
     $(NULL)
+
+if ENABLE_GDK3_WAYLAND
+AM_CPPFLAGS += \
+    -I$(top_srcdir)/client/wayland \
+    -I$(top_builddir)/client/wayland \
+    $(NULL)
+AM_VALAFLAGS += \
+    --vapidir=$(top_builddir)/client/wayland \
+    --vapidir=$(top_srcdir)/client/wayland \
+    --pkg=ibus-wayland-im-1.0 \
+    --pkg=gdk-wayland --define=USE_GDK_WAYLAND \
+    $(NULL)
+AM_LDADD += \
+    $(libibuswaylandim) \
+    $(NULL)
+desktop_DATA += \
+    $(IBUS_UI_WAYLAND_DESKTOP) \
+    $(NULL)
+$(IBUS_UI_WAYLAND_DESKTOP): ibus-ui-wayland.desktop
+	$(AM_V_GEN) $(MSGFMT) --desktop --template $< -d $(top_srcdir)/po -o $@
+	$(NULL)
+endif
 
 if ENABLE_EMOJI_DICT
 AM_VALAFLAGS += --define=EMOJI_DICT
@@ -244,47 +317,23 @@ panelbinding.o: $(srcdir)/panelbinding.c
 	$(AM_V_CC_no)$(COMPILE) -c -o $@ $<
 	$(NULL)
 
+.NOTPARALLEL:
+
 MAINTAINERCLEANFILES += extension.c panelbinding.c
 
-man_seven_files = $(man_seven_in_files:.7.in=.7)
-man_seven_DATA =$(man_seven_files:.7=.7.gz)
+man_seven_DATA = ibus-emoji.7
 man_sevendir = $(mandir)/man7
-%.7: %.7.in
-	$(AM_V_GEN) sed \
-	    -e 's|@VERSION[@]|$(VERSION)|g' $< > $@.tmp && \
-	    mv $@.tmp $@
-%.7.gz: %.7
-	$(AM_V_GEN) gzip -c $< > $@.tmp && mv $@.tmp $@
 
-desktop_in_files = \
-    ibus-ui-emojier.desktop.in \
-    ibus-extension-gtk3.desktop.in \
-    $(NULL)
-desktop_notrans_files = $(desktop_in_files:.desktop.in=.desktop)
-desktop_DATA = \
+desktop_DATA += \
     org.freedesktop.IBus.Panel.Emojier.desktop \
     org.freedesktop.IBus.Panel.Extension.Gtk3.desktop \
     $(NULL)
-desktopdir = $(datadir)/applications
-%.desktop: %.desktop.in
-	$(AM_V_GEN) sed \
-		-e 's|@libexecdir[@]|$(libexecdir)|g' $< > $@.tmp && \
-                mv $@.tmp $@
-	$(NULL)
 org.freedesktop.IBus.Panel.Emojier.desktop: ibus-ui-emojier.desktop
 	$(AM_V_GEN) $(MSGFMT) --desktop --template $< -d $(top_srcdir)/po -o $@
 	$(NULL)
 org.freedesktop.IBus.Panel.Extension.Gtk3.desktop: ibus-extension-gtk3.desktop
 	$(AM_V_GEN) $(MSGFMT) --desktop --template $< -d $(top_srcdir)/po -o $@
 	$(NULL)
-
-CLEANFILES += \
-    $(desktop_DATA) \
-    $(desktop_notrans_files) \
-    $(man_seven_DATA) \
-    $(man_seven_files) \
-    $(NULL)
-
 endif
 # end of ENABLE_EMOJI_DICT
 

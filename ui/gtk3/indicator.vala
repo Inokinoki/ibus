@@ -2,7 +2,7 @@
  *
  * ibus - The Input Bus
  *
- * Copyright(c) 2015-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2015-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  * Copyright(c) 2015 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
@@ -26,6 +26,8 @@
  * for left click on the indicator.
  */
 
+// I have no idea to exempt this file to make ibus_ui_gtk3_vala.stamp
+#if INDICATOR
 public extern string _notification_item;
 public extern string _notification_watcher;
 
@@ -92,27 +94,30 @@ class Indicator : IBus.Service
 
     private GLib.DBusNodeInfo m_watcher_node_info;
     private unowned GLib.DBusInterfaceInfo m_watcher_interface_info;
+    private bool m_registered;
     private GLib.DBusProxy m_proxy;
     private int m_context_menu_x;
     private int m_context_menu_y;
     private int m_activate_menu_x;
     private int m_activate_menu_y;
     private Gdk.Window m_indicator_window;
+    private Gtk.Menu m_menu;
+    private Dbusmenu.Server m_dbusmenu_server;
 
 
     public Indicator(string id,
-                     GLib.DBusConnection connection,
                      Category category = Category.OTHER) {
         string path = DEFAULT_ITEM_PATH + "/" + id;
         path = path.delimit("-", '_');
 
         // AppIndicator.set_category() converts enum value to string internally.
+        // If connection is not assigned in the constructor, register() is
+        // not called.
         GLib.Object(object_path: path,
                     id: id,
-                    connection: connection,
                     category_s: category.to_nick());
         this.status_s = Status.PASSIVE.to_nick();
-        this.icon_name = "";
+        this.icon_name = "ibus";
         this.icon_desc = "";
         this.title = "";
         this.icon_theme_path = "";
@@ -120,16 +125,9 @@ class Indicator : IBus.Service
         this.attention_icon_desc = "";
         this.label_s = "";
         this.label_guide_s = "";
-        unregister(connection);
+        var n = free_interfaces(0);
+        free_interfaces(-n);
         add_interfaces(_notification_item);
-        try {
-            if (!register(connection))
-                return;
-        } catch (GLib.Error e) {
-            warning("Failed to register the application indicator xml: " +
-                    e.message);
-            return;
-        }
 
         try {
             m_watcher_node_info =
@@ -141,26 +139,63 @@ class Indicator : IBus.Service
         m_watcher_interface_info =
                 m_watcher_node_info.lookup_interface(
                         NOTIFICATION_WATCHER_DBUS_IFACE);
-        check_connect();
+        GLib.Bus.watch_name (GLib.BusType.SESSION,
+                             NOTIFICATION_WATCHER_DBUS_ADDR,
+                             GLib.BusNameWatcherFlags.NONE,
+                             name_appeared_handler,
+                             name_vanished_handler);
+        GLib.Bus.get.begin(GLib.BusType.SESSION, null, (obj, res) => {
+            try {
+                this.connection = GLib.Bus.get.end(res);
+                check_connect();
+            } catch (GLib.IOError e) {
+                warning("Failed to get the session bus: %s", e.message);
+            }
+        });
+    }
+
+
+    private void name_appeared_handler(GLib.DBusConnection connection,
+                                       string name,
+                                       string name_owner) {
+        // FIXME: https://discourse.gnome.org/t/how-to-write-vala-glib-dbusproxy-async/2059
+        GLib.DBusProxy.new.begin(
+                connection,
+                GLib.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES |
+                        GLib.DBusProxyFlags.DO_NOT_CONNECT_SIGNALS,
+                m_watcher_interface_info,
+                NOTIFICATION_WATCHER_DBUS_ADDR,
+                NOTIFICATION_WATCHER_DBUS_OBJ,
+                NOTIFICATION_WATCHER_DBUS_IFACE,
+                null,
+                (obj, res) => {
+                        bus_watcher_ready(obj, res);
+                });
+    }
+
+
+    private void name_vanished_handler(GLib.DBusConnection connection,
+                                       string name) {
+        m_proxy = null;
     }
 
 
     private void check_connect() {
-        if (m_proxy == null) {
-            GLib.DBusProxy.new.begin(
-                    connection,
-                    GLib.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES |
-                            GLib.DBusProxyFlags.DO_NOT_CONNECT_SIGNALS,
-                    m_watcher_interface_info,
-                    NOTIFICATION_WATCHER_DBUS_ADDR,
-                    NOTIFICATION_WATCHER_DBUS_OBJ,
-                    NOTIFICATION_WATCHER_DBUS_IFACE,
-                    null,
-                    (obj, res) => {
-                            bus_watcher_ready(obj, res);
-                    });
-        } else {
-            bus_watcher_ready(null, null);
+        if (this.connection == null)
+            return;
+        if (m_menu == null)
+            return;
+        try {
+            if (!m_registered) {
+                if (!register(this.connection))
+                    return;
+                else
+                    m_registered = true;
+            }
+        } catch (GLib.Error e) {
+            warning("Failed to register the application indicator xml: " +
+                    e.message);
+            return;
         }
     }
 
@@ -229,12 +264,14 @@ class Indicator : IBus.Service
 
 
     private Gdk.Window? query_gdk_window() {
+#if ENABLE_XIM
         if (m_indicator_window != null)
             return m_indicator_window;
 
-        Gdk.Display display = Gdk.Display.get_default();
-        unowned X.Display xdisplay =
-                (display as Gdk.X11.Display).get_xdisplay();
+        var display = BindingCommon.get_xdisplay();
+        if (display == null)
+            return null;
+        unowned X.Display xdisplay = display.get_xdisplay();
         X.Window current = xdisplay.default_root_window();
         X.Window parent = 0;
         X.Window child = 0;
@@ -275,6 +312,9 @@ class Indicator : IBus.Service
                 display as Gdk.X11.Display,
                 current);
         return m_indicator_window;
+#else
+        return null;
+#endif
     }
 
 
@@ -331,7 +371,13 @@ class Indicator : IBus.Service
 
 
     private GLib.Variant? _get_menu(GLib.DBusConnection connection) {
-        return null;
+        if (m_dbusmenu_server != null) {
+            string o;
+            m_dbusmenu_server.get(Dbusmenu.SERVER_PROP_DBUS_OBJECT, out o);
+            var variant = new GLib.Variant("o", o);
+            return variant;
+        }
+        return new GLib.Variant("o", "/");;
     }
 
 
@@ -372,6 +418,10 @@ class Indicator : IBus.Service
             _context_menu_cb(connection, parameters, invocation);
             return;
         }
+        if (method_name == "SecondaryActivate") {
+            secondary_activate();
+            return;
+        }
 
         warning("service_method_call() does not handle the method: " +
                 method_name);
@@ -383,45 +433,59 @@ class Indicator : IBus.Service
                                                        string   sender,
                                                        string   object_path,
                                                        string   interface_name,
-                                                       string   property_name) {
-        GLib.return_val_if_fail (object_path == this.object_path, null);
-        GLib.return_val_if_fail (
-                interface_name == NOTIFICATION_ITEM_DBUS_IFACE,
-                null);
+                                                       string   property_name)
+    throws GLib.Error {
+        if (object_path != this.object_path) {
+            throw new GLib.DBusError.FAILED(
+                    "%s != %s".printf(object_path, this.object_path));
+        }
+        if (interface_name != NOTIFICATION_ITEM_DBUS_IFACE) {
+            throw new GLib.DBusError.FAILED(
+                    "%s != %s".printf(interface_name,
+                                      NOTIFICATION_ITEM_DBUS_IFACE));
+        }
 
-        if (property_name == "Id")
-            return _get_id(connection);
-        if (property_name == "Category")
-            return _get_category(connection);
-        if (property_name == "Status")
-            return _get_status(connection);
-        if (property_name == "IconName")
-            return _get_icon_name(connection);
-        if (property_name == "IconPixmap")
-            return _get_icon_vector(connection);
-        if (property_name == "IconAccessibleDesc")
-            return _get_icon_desc(connection);
-        if (property_name == "AttentionIconName")
-            return _get_attention_icon_name(connection);
-        if (property_name == "AttentionAccessibleDesc")
-            return _get_attention_icon_desc(connection);
-        if (property_name == "Title")
-            return _get_title(connection);
-        if (property_name == "IconThemePath")
-            return _get_icon_theme_path(connection);
-        if (property_name == "Menu")
-            return _get_menu(connection);
-        if (property_name == "XAyatanaLabel")
-            return _get_xayatana_label(connection);
-        if (property_name == "XAyatanaLabelGuide")
-            return _get_xayatana_label_guide(connection);
-        if (property_name == "XAyatanaOrderingIndex")
-            return _get_xayatana_ordering_index(connection);
+        GLib.Variant? result = null;
+        if (property_name == "Id") {
+            result = _get_id(connection);
+        } else if (property_name == "Category") {
+            result = _get_category(connection);
+        } else if (property_name == "Status") {
+            result = _get_status(connection);
+        } else if (property_name == "IconName") {
+            result = _get_icon_name(connection);
+        } else if (property_name == "IconPixmap") {
+            result = _get_icon_vector(connection);
+        } else if (property_name == "IconAccessibleDesc") {
+            result = _get_icon_desc(connection);
+        } else if (property_name == "AttentionIconName") {
+            result = _get_attention_icon_name(connection);
+        } else if (property_name == "AttentionAccessibleDesc") {
+            result = _get_attention_icon_desc(connection);
+        } else if (property_name == "Title") {
+            result = _get_title(connection);
+        } else if (property_name == "IconThemePath") {
+            result = _get_icon_theme_path(connection);
+        } else if (property_name == "Menu") {
+            result = _get_menu(connection);
+        } else if (property_name == "XAyatanaLabel") {
+            result = _get_xayatana_label(connection);
+        } else if (property_name == "XAyatanaLabelGuide") {
+            result = _get_xayatana_label_guide(connection);
+        } else if (property_name == "XAyatanaOrderingIndex") {
+            result = _get_xayatana_ordering_index(connection);
+        } else {
+            throw new GLib.DBusError.UNKNOWN_PROPERTY(
+                "IBus.Indicator does not handle the property: "
+                + property_name);
+        }
 
-        warning("service_get_property() does not handle the property: " +
-                property_name);
-
-        return null;
+        if (result == null) {
+            throw new GLib.DBusError.FAILED(
+                "IBus.Indicator returns null for the property "
+                + property_name);
+        }
+        return result;
     }
 
 
@@ -482,7 +546,7 @@ class Indicator : IBus.Service
          * this.connection emits the "NewIcon" signal or
          * or m_proxy calls the "RegisterStatusNotifierItem" signal.
          */
-        if (this.connection == null)
+        if (this.connection == null || !m_registered)
             return;
         try {
             this.connection.emit_signal(null,
@@ -540,6 +604,20 @@ class Indicator : IBus.Service
     }
 
 
+    public void set_menu(Gtk.Menu menu) {
+        if (this.object_path == null)
+            return;
+        m_menu = menu;
+        if (m_dbusmenu_server == null) {
+            var path = this.object_path + "/Menu";
+            m_dbusmenu_server = new Dbusmenu.Server(path);
+        }
+        var root = DbusmenuGtk.gtk_parse_menu_structure(menu);
+        m_dbusmenu_server.set_root(root);
+        check_connect();
+    }
+
+
     public void position_context_menu(Gtk.Menu menu,
                                       out int  x,
                                       out int  y,
@@ -584,5 +662,7 @@ class Indicator : IBus.Service
     public signal void activate(int        x,
                                 int        y,
                                 Gdk.Window window);
+    public signal void secondary_activate();
     public signal void registered_status_notifier_item();
 }
+#endif

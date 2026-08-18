@@ -4,7 +4,7 @@
  *
  * Copyright(c) 2013-2016 Red Hat, Inc.
  * Copyright(c) 2013-2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2013-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2013-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -30,7 +30,9 @@ enum PanelShow {
 
 public class PropertyPanel : Gtk.Box {
     private unowned Gdk.Window m_root_window;
+#if ENABLE_XIM
     private unowned X.Display m_xdisplay;
+#endif
     private Gtk.Window m_toplevel;
     private IBus.PropList m_props;
     private IPropToolItem[] m_items;
@@ -51,12 +53,24 @@ public class PropertyPanel : Gtk.Box {
 
         set_visible(true);
 
-        m_root_window = Gdk.get_default_root_window();
-        unowned Gdk.Display display = m_root_window.get_display();
-#if VALA_0_24
-        m_xdisplay = (display as Gdk.X11.Display).get_xdisplay();
-#else
-        m_xdisplay = Gdk.X11Display.get_xdisplay(display);
+#if ENABLE_XIM
+        Gdk.X11.Display? display = null;
+        // Disable X11 display in Wayland as a workaround.
+        // GTK3 causes a SEGV when the session is switched to the console
+        // in Wayland with Ctrl-Alt-F3 because it calls
+        // gdk_display_get_default() by
+        // gdk_x11_get_xatom_by_name("Wacom Serial IDs") and the display
+        // is not X11.
+        // Need to backport the fix to GTK3:
+        // https://gitlab.gnome.org/GNOME/gtk/-/commit/920259c2
+        // or need to migrate IBus panel to GTK4.
+        if (BindingCommon.default_is_xdisplay())
+            display = BindingCommon.get_xdisplay();
+        if (display != null) {
+            m_xdisplay = display.get_xdisplay();
+            var screen = display.get_default_screen();
+            m_root_window = screen.get_root_window();
+        }
 #endif
 
         m_toplevel = new Gtk.Window(Gtk.WindowType.POPUP);
@@ -78,9 +92,11 @@ public class PropertyPanel : Gtk.Box {
             }
         });
 
+#if ENABLE_XIM
         // PropertyPanel runs before KDE5 panel runs and
         // monitor the desktop size.
         monitor_net_workarea_atom();
+#endif
     }
 
     public void set_properties(IBus.PropList props) {
@@ -94,7 +110,7 @@ public class PropertyPanel : Gtk.Box {
             Type type = item.get_type();
             if (type == typeof(PropMenuToolButton) ||
                 type == typeof(PropToggleToolButton)) {
-                if ((item as Gtk.ToggleToolButton).get_active()) {
+                if (((Gtk.ToggleToolButton)item).get_active()) {
                     has_active = true;
                     break;
                 }
@@ -316,16 +332,20 @@ public class PropertyPanel : Gtk.Box {
             cursor_right_bottom.y + allocation.height
         };
 
-        int root_width = m_root_window.get_width();
-        int root_height = m_root_window.get_height();
+        int root_width = 0;
+        int root_height = 0;
+        if (m_root_window != null) {
+            root_width = m_root_window.get_width();
+            root_height = m_root_window.get_height();
+        }
 
         int x, y;
-        if (window_right_bottom.x > root_width)
+        if (window_right_bottom.x > root_width && root_width > 0)
             x = root_width - allocation.width;
         else
             x = cursor_right_bottom.x;
 
-        if (window_right_bottom.y > root_height)
+        if (window_right_bottom.y > root_height && root_height > 0)
             y = m_cursor_location.y - allocation.height;
         else
             y = cursor_right_bottom.y;
@@ -350,15 +370,10 @@ public class PropertyPanel : Gtk.Box {
         m_toplevel.get_allocation(out allocation);
 
         Gdk.Rectangle monitor_area;
-#if VALA_0_34
         // gdk_screen_get_monitor_workarea() no longer return the correct
         // area from "_NET_WORKAREA" atom in GTK 3.22
         Gdk.Monitor monitor = Gdk.Display.get_default().get_monitor(0);
         monitor_area = monitor.get_workarea();
-#else
-        Gdk.Screen screen = Gdk.Screen.get_default();
-        monitor_area = screen.get_monitor_workarea(0);
-#endif
         int monitor_right = monitor_area.x + monitor_area.width;
         int monitor_bottom = monitor_area.y + monitor_area.height;
         int x, y;
@@ -385,10 +400,18 @@ public class PropertyPanel : Gtk.Box {
         move(x, y);
     }
 
+#if ENABLE_XIM
     private Gdk.FilterReturn root_window_filter(Gdk.XEvent gdkxevent,
                                                 Gdk.Event  event) {
         X.Event *xevent = (X.Event*) gdkxevent;
         if (xevent.type == X.EventType.PropertyNotify) {
+            if (m_xdisplay == null) {
+                if (m_remove_filter_id > 0) {
+                    GLib.Source.remove(m_remove_filter_id);
+                    m_remove_filter_id = 0;
+                }
+                return Gdk.FilterReturn.CONTINUE;
+            }
             string aname = m_xdisplay.get_atom_name(xevent.xproperty.atom);
             if (aname == "_NET_WORKAREA" && xevent.xproperty.state == 0) {
                 set_default_location();
@@ -419,6 +442,7 @@ public class PropertyPanel : Gtk.Box {
         },
         GLib.Priority.DEFAULT_IDLE);
     }
+#endif
 
     private void show_with_auto_hide_timer() {
         /* Do not call gtk_window_resize() in
@@ -506,15 +530,10 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
     public new void popup(uint       button,
                           uint32     activate_time,
                           Gtk.Widget widget) {
-#if VALA_0_34
         base.popup_at_widget(widget,
                              Gdk.Gravity.SOUTH_WEST,
                              Gdk.Gravity.NORTH_WEST,
                              null);
-#else
-        m_parent_button = widget;
-        base.popup(null, null, menu_position, button, activate_time);
-#endif
     }
 
     public override void destroy() {
@@ -572,57 +591,6 @@ public class PropMenu : Gtk.Menu, IPropToolItem {
             }
         }
     }
-
-#if !VALA_0_34
-    private void menu_position(Gtk.Menu menu,
-                               out int  x,
-                               out int  y,
-                               out bool push_in) {
-        var button = m_parent_button;
-        var screen = button.get_screen();
-        var monitor = screen.get_monitor_at_window(button.get_window());
-
-        Gdk.Rectangle monitor_location;
-        screen.get_monitor_geometry(monitor, out monitor_location);
-
-        button.get_window().get_origin(out x, out y);
-
-        Gtk.Allocation button_allocation;
-        button.get_allocation(out button_allocation);
-
-        x += button_allocation.x;
-        y += button_allocation.y;
-
-        int menu_width;
-        int menu_height;
-        menu.get_size_request(out menu_width, out menu_height);
-
-        if (x + menu_width >= monitor_location.width)
-            x -= menu_width - button_allocation.width;
-        else if (x - menu_width <= 0)
-            ;
-        else {
-            if (x <= monitor_location.width * 3 / 4)
-                ;
-            else
-                x -= menu_width - button_allocation.width;
-        }
-
-        if (y + button_allocation.height + menu_width
-                >= monitor_location.height)
-            y -= menu_height;
-        else if (y - menu_height <= 0)
-            y += button_allocation.height;
-        else {
-            if (y <= monitor_location.height * 3 / 4)
-                y += button_allocation.height;
-            else
-                y -= menu_height;
-        }
-
-        push_in = false;
-    }
-#endif
 }
 
 public class PropToolButton : Gtk.ToolButton, IPropToolItem {

@@ -1,8 +1,8 @@
 /* -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
 /* vim:set et sts=4: */
 /* bus - The Input Bus
- * Copyright (C) 2018-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2018-2019 Red Hat, Inc.
+ * Copyright (C) 2018-2021 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2018-2021 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -380,9 +380,11 @@ static void
 variant_foreach_add_unicode (IBusUnicodeData *unicode,
                              GVariantBuilder *builder)
 {
-    g_variant_builder_add (
-            builder, "v",
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
             ibus_serializable_serialize (IBUS_SERIALIZABLE (unicode)));
+    g_variant_builder_close (builder);
 }
 
 static GVariant *
@@ -472,7 +474,12 @@ ibus_unicode_data_save (const gchar *path,
 
     dir = g_path_get_dirname (path);
     if (g_strcmp0 (dir, ".") != 0 && g_stat (dir, &buf) != 0) {
-        g_mkdir_with_parents (dir, 0777);
+        errno = 0;
+        if (g_mkdir_with_parents (dir, 0777)) {
+            g_warning ("Failed to mkdir %s: %s", dir, g_strerror (errno));
+            return;
+        }
+
     }
     g_free (dir);
     if (!g_file_set_contents (path, contents, length, &error)) {
@@ -641,6 +648,7 @@ ibus_unicode_data_load_async_done (GObject *source_object,
     } else {
         data->callback (list, data->user_data);
     }
+    g_slist_free_full (list, (GDestroyNotify)g_object_unref);
     g_slice_free (IBusUnicodeDataLoadData, data);
 }
 
@@ -754,7 +762,7 @@ ibus_unicode_block_destroy (IBusUnicodeBlock *block)
 {
     g_clear_pointer (&block->priv->name, g_free);
 
-    IBUS_OBJECT_CLASS (ibus_unicode_data_parent_class)->
+    IBUS_OBJECT_CLASS (ibus_unicode_block_parent_class)->
             destroy (IBUS_OBJECT (block));
 }
 
@@ -903,9 +911,11 @@ static void
 variant_foreach_add_block (IBusUnicodeBlock *block,
                            GVariantBuilder *builder)
 {
-    g_variant_builder_add (
-            builder, "v",
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
             ibus_serializable_serialize (IBUS_SERIALIZABLE (block)));
+    g_variant_builder_close (builder);
 }
 
 static GVariant *
@@ -967,7 +977,11 @@ ibus_unicode_block_save (const gchar *path,
 
     dir = g_path_get_dirname (path);
     if (g_strcmp0 (dir, ".") != 0 && g_stat (dir, &buf) != 0) {
-        g_mkdir_with_parents (dir, 0777);
+        errno = 0;
+        if (g_mkdir_with_parents (dir, 0777)) {
+            g_warning ("Failed to mkdir %s: %s", dir, g_strerror (errno));
+            return;
+        }
     }
     g_free (dir);
     if (!g_file_set_contents (path, contents, length, &error)) {

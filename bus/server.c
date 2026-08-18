@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2011-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2019 Red Hat, Inc.
+ * Copyright (C) 2011-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2021 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,13 +22,18 @@
  */
 #include "server.h"
 
-#include <errno.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
-#include <stdlib.h>
-#include <fcntl.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <limits.h>
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "dbusimpl.h"
 #include "ibusimpl.h"
@@ -39,20 +44,42 @@ static GDBusServer *server = NULL;
 static GMainLoop *mainloop = NULL;
 static BusDBusImpl *dbus = NULL;
 static BusIBusImpl *ibus = NULL;
-static gchar *address = NULL;
+static char *address = NULL;
 static gboolean _restart = FALSE;
+
+static gchar *
+bus_get_executable_path (void)
+{
+#ifdef __linux__
+    return g_file_read_link ("/proc/self/exe", NULL);
+#elif defined(__APPLE__)
+    char pathbuf[PATH_MAX];
+    char resolved[PATH_MAX];
+    uint32_t size = sizeof (pathbuf);
+
+    if (_NSGetExecutablePath (pathbuf, &size) != 0)
+        return NULL;
+    if (realpath (pathbuf, resolved) != NULL)
+        return g_strdup (resolved);
+    return g_strdup (pathbuf);
+#else
+    return NULL;
+#endif
+}
 
 static void
 _restart_server (void)
 {
-    gchar *exe;
-    gint fd;
+    char *exe;
+    int fd;
+#ifdef __linux__
     ssize_t r;
     int MAXSIZE = 0xFFF;
     char proclnk[MAXSIZE];
     char filename[MAXSIZE];
+#endif
 
-    exe = g_file_read_link ("/proc/self/exe", NULL);
+    exe = bus_get_executable_path ();
 
     if (exe == NULL)
         exe = g_strdup (BINDIR "/ibus-daemon");
@@ -62,6 +89,7 @@ _restart_server (void)
         errno = 0;
         /* only close valid fds */
         if (fcntl (fd, F_GETFD) != -1 || errno != EBADF) {
+#ifdef __linux__
             g_sprintf (proclnk, "/proc/self/fd/%d", fd);
             r = readlink (proclnk, filename, MAXSIZE);
             if (r < 0) {
@@ -73,6 +101,9 @@ _restart_server (void)
             if (g_strcmp0 (filename, "anon_inode:inotify") != 0) {
                 close (fd);
             }
+#else
+            close (fd);
+#endif
         }
     }
 
@@ -202,11 +233,11 @@ bus_acquired_handler (GDBusConnection       *connection,
                             NULL);
 }
 
-static gchar *
+static char *
 _bus_extract_address (void)
 {
-    gchar *socket_address = g_strdup (g_address);
-    gchar *p;
+    char *socket_address = g_strdup (g_address);
+    char *p;
 
 #define IF_REPLACE_VARIABLE_WITH_FUNC(variable, func, format)           \
     if ((p = g_strstr_len (socket_address, -1, (variable)))) {          \
@@ -243,12 +274,12 @@ bus_server_init (void)
 #define IBUS_UNIX_ABSTRACT      "unix:abstract="
 #define IBUS_UNIX_DIR           "unix:dir="
 
-    gchar *socket_address;
+    char *socket_address;
     GDBusServerFlags flags = G_DBUS_SERVER_FLAGS_NONE;
-    gchar *guid;
+    char *guid;
     GDBusAuthObserver *observer;
     GError *error = NULL;
-    gchar *unix_dir = NULL;
+    char *unix_dir = NULL;
 
     dbus = bus_dbus_impl_get_default ();
     ibus = bus_ibus_impl_get_default ();
@@ -257,18 +288,26 @@ bus_server_init (void)
     /* init server */
     socket_address = _bus_extract_address ();
 
-#define IF_GET_UNIX_DIR(prefix)                                         \
+#define IF_GET_UNIX_DIR_FROM_DIR(prefix)                                \
     if (g_str_has_prefix (socket_address, (prefix))) {                  \
         unix_dir = g_strdup (socket_address + strlen (prefix));         \
     }
+#define IF_GET_UNIX_DIR_FROM_PATH(prefix)                               \
+    if (g_str_has_prefix (socket_address, (prefix))) {                  \
+        const char *unix_path = socket_address + strlen (prefix);       \
+        unix_dir = g_path_get_dirname (unix_path);                      \
+    }
+#define IF_GET_UNIX_DIR_FROM_ABSTRACT(prefix)                           \
+    if (g_str_has_prefix (socket_address, (prefix))) {}
 
-    IF_GET_UNIX_DIR (IBUS_UNIX_TMPDIR)
+
+    IF_GET_UNIX_DIR_FROM_DIR (IBUS_UNIX_TMPDIR)
     else
-    IF_GET_UNIX_DIR (IBUS_UNIX_PATH)
+    IF_GET_UNIX_DIR_FROM_PATH (IBUS_UNIX_PATH)
     else
-    IF_GET_UNIX_DIR (IBUS_UNIX_ABSTRACT)
+    IF_GET_UNIX_DIR_FROM_ABSTRACT (IBUS_UNIX_ABSTRACT)
     else
-    IF_GET_UNIX_DIR (IBUS_UNIX_DIR)
+    IF_GET_UNIX_DIR_FROM_DIR (IBUS_UNIX_DIR)
     else {
         g_error ("Your socket address \"%s\" does not correspond with "
                  "one of the following formats; "
@@ -276,12 +315,14 @@ bus_server_init (void)
                  IBUS_UNIX_ABSTRACT "FILE, " IBUS_UNIX_DIR "DIR.",
                  socket_address);
     }
-    if (!g_file_test (unix_dir, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_DIR)) {
+    if (unix_dir &&
+        !g_file_test (unix_dir, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_DIR)) {
         /* Require mkdir for BSD system.
          * The mode 0700 can eliminate malicious users change the mode.
          * `chmod` runs for the last directory only not to change the modes
          * of the parent directories. E.g. "/tmp/ibus".
          */
+        errno = 0;
         if (g_mkdir_with_parents (unix_dir, 0700) != 0) {
             g_error ("mkdir is failed in: %s: %s",
                      unix_dir, g_strerror (errno));
@@ -329,7 +370,9 @@ bus_server_init (void)
                     bus_acquired_handler,
                     NULL, NULL, NULL, NULL);
 
-#undef IF_GET_UNIX_DIR
+#undef IF_GET_UNIX_DIR_FROM_DIR
+#undef IF_GET_UNIX_DIR_FROM_PATH
+#undef IF_GET_UNIX_DIR_FROM_ABSTRACT
 #undef IBUS_UNIX_TMPDIR
 #undef IBUS_UNIX_PATH
 #undef IBUS_UNIX_ABSTRACT
@@ -356,6 +399,8 @@ bus_server_run (void)
 
     ibus_object_destroy ((IBusObject *)dbus);
     ibus_object_destroy ((IBusObject *)ibus);
+    g_object_unref (ibus);
+    g_object_unref (dbus);
 
     /* release resources */
     g_object_unref (server);

@@ -2,7 +2,8 @@
 /* vim:set et sts=4: */
 /* IBus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2010 Red Hat, Inc.
+ * Copyright (C) 2011-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2021 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -87,7 +88,15 @@ ibus_text_serialize (IBusText        *text,
         text->attrs = ibus_attr_list_new ();
         g_object_ref_sink (text->attrs);
     }
-    g_variant_builder_add (builder, "v", ibus_serializable_serialize ((IBusSerializable *)text->attrs));
+    /* Replaced g_variant_builder_add() with g_variant_builder_open() &
+     * g_variant_builder_close() to avoid creating temporary objects during
+     * serialization.
+     */
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
+            ibus_serializable_serialize ((IBusSerializable *)text->attrs));
+    g_variant_builder_close (builder);
 
     return TRUE;
 }
@@ -100,7 +109,7 @@ ibus_text_deserialize (IBusText *text,
     retval = IBUS_SERIALIZABLE_CLASS (ibus_text_parent_class)->deserialize (
                             (IBusSerializable *)text, variant);
 
-    if (text->is_static == FALSE)
+    if (!text->is_static)
         g_free (text->text);
     g_variant_get_child (variant, retval++, "s", &text->text);
     text->is_static = FALSE;
@@ -130,10 +139,15 @@ ibus_text_copy (IBusText       *dest,
     g_return_val_if_fail (IBUS_IS_TEXT (dest), FALSE);
     g_return_val_if_fail (IBUS_IS_TEXT (src), FALSE);
 
+    if (!dest->is_static)
+        g_free (dest->text);
     dest->text = g_strdup (src->text);
     dest->is_static = FALSE;
+    if (dest->attrs)
+        g_clear_object (&dest->attrs);
     if (src->attrs) {
-        dest->attrs = (IBusAttrList *)ibus_serializable_copy ((IBusSerializable *)src->attrs);
+        dest->attrs = (IBusAttrList *)ibus_serializable_copy (
+                (IBusSerializable *)src->attrs);
         g_object_ref_sink (dest->attrs);
     }
 
@@ -220,7 +234,7 @@ ibus_text_new_from_unichar (gunichar c)
     text= g_object_new (IBUS_TYPE_TEXT, NULL);
 
     text->is_static = FALSE;
-    text->text = (gchar *)g_malloc (12);
+    g_return_val_if_fail ((text->text = (gchar *)g_malloc (12)), NULL);
     len = g_unichar_to_utf8 (c, text->text);
     text->text[len] =  0;
 
@@ -248,6 +262,7 @@ ibus_text_append_attribute (IBusText *text,
 
     if (text->attrs == NULL) {
         text->attrs = ibus_attr_list_new ();
+        g_object_ref_sink (text->attrs);
     }
 
     attr = ibus_attribute_new (type, value, start_index, end_index);

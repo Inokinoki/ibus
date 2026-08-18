@@ -48,8 +48,8 @@ _sleep (guint millisecond)
    Key kind are a-z and space.
    Check ibus-daemon and ibus engine crash.
 */
-gint
-main (gint argc, gchar **argv)
+static void
+test (void)
 {
     GTimer *timer;
     GRand *rnd;
@@ -58,9 +58,6 @@ main (gint argc, gchar **argv)
     guint32 seed = (guint32) time (NULL);
     int count = 0;
     int send_key_num = 0;
-
-    setlocale (LC_ALL, "");
-    ibus_init ();
 
     /* need to set active engine */
     client = bus_test_client_new ();
@@ -110,6 +107,16 @@ main (gint argc, gchar **argv)
     }
 
     g_print ("%f sec\n", g_timer_elapsed (timer, NULL));
+    g_timer_destroy (timer);
+    g_rand_free (rnd);
+}
 
-    return 0;
+int
+main (int argc, char *argv[])
+{
+    g_test_init (&argc, &argv, NULL);
+    setlocale (LC_ALL, "");
+    ibus_init ();
+    g_test_add_func ("/test-stress", test);
+    return g_test_run ();
 }

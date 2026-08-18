@@ -27,6 +27,10 @@ if ENABLE_UI
 UI_DIR = ui
 endif
 
+if ENABLE_MACOS_UI
+UI_DIR = ui
+endif
+
 if ENABLE_ENGINE
 ENGINE_DIR = engine
 endif
@@ -55,13 +59,13 @@ SUBDIRS = \
 	data \
 	m4 \
 	po \
-	docs \
 	$(ENGINE_DIR) \
 	$(UI_DIR) \
 	tools \
 	$(DAEMON_DIR) \
 	$(PYTHON_LIB_DIRS) \
 	$(SETUP_DIR) \
+	docs \
 	$(NULL)
 
 ACLOCAL_AMFLAGS = -I m4
@@ -75,6 +79,7 @@ EXTRA_DIST = \
 	autogen.sh \
 	$(ibus_pc_in) \
 	ibus.spec.in \
+	meson.config \
 	python-config.py \
 	xinput-ibus \
 	$(NULL)
@@ -138,8 +143,16 @@ srpm: dist @PACKAGE_NAME@.spec
 			--define "_specdir `pwd`/rpm" \
 			@PACKAGE_NAME@.spec
 
+@PACKAGE_NAME@-@PACKAGE_VERSION@.%.sum: @PACKAGE_NAME@-@PACKAGE_VERSION@.%
+	f=`basename $@ .sum`; \
+	printf "cksum %s %s %s\n"      `cksum $$f`     >  $@; \
+	printf "sha1sum %s %s\n"       `sha1sum $$f`   >> $@; \
+	printf "sha256sum %s %s\n"     `sha256sum $$f` >> $@; \
+	printf "sha512sum %s %s\n"     `sha512sum $$f` >> $@; \
+	$(NULL)
+
 clean-rpm:
-	$(RM) -r "`uname -i`"
+	-$(RM) -r "`uname -i`"
 
 clean-local: clean-rpm
 

@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2015 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2015-2019 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2015-2019 Red Hat, Inc.
+ * Copyright (C) 2015-2021 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2015-2020 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,6 +20,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
  * USA
  */
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -29,7 +33,7 @@
 #include "ibusregistry.h"
 
 #define IBUS_CACHE_MAGIC 0x49425553 /* "IBUS" */
-#define IBUS_CACHE_VERSION 0x00010512
+#define IBUS_CACHE_VERSION 0x00010522
 
 enum {
     CHANGED,
@@ -154,9 +158,11 @@ ibus_registry_serialize (IBusRegistry    *registry,
     array = g_variant_builder_new (G_VARIANT_TYPE ("av"));
     for (p = registry->priv->observed_paths; p != NULL; p = p->next) {
         IBusSerializable *serializable = (IBusSerializable *) p->data;
-        g_variant_builder_add (array,
-                               "v",
-                               ibus_serializable_serialize (serializable));
+        g_variant_builder_open (array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                array,
+                ibus_serializable_serialize (serializable));
+        g_variant_builder_close (array);
     }
     g_variant_builder_add (builder, "av", array);
     g_variant_builder_unref (array);
@@ -164,9 +170,11 @@ ibus_registry_serialize (IBusRegistry    *registry,
     array = g_variant_builder_new (G_VARIANT_TYPE ("av"));
     for (p = registry->priv->components; p != NULL; p = p->next) {
         IBusSerializable *serializable = (IBusSerializable *) p->data;
-        g_variant_builder_add (array,
-                               "v",
-                               ibus_serializable_serialize (serializable));
+        g_variant_builder_open (array, G_VARIANT_TYPE_VARIANT);
+        g_variant_builder_add_value (
+                array,
+                ibus_serializable_serialize (serializable));
+        g_variant_builder_close (array);
     }
     g_variant_builder_add (builder, "av", array);
     g_variant_builder_unref (array);
@@ -438,7 +446,12 @@ ibus_registry_save_cache_file (IBusRegistry *registry,
     g_assert (filename != NULL);
 
     cachedir = g_path_get_dirname (filename);
-    g_mkdir_with_parents (cachedir, 0775);
+    errno = 0;
+    if (g_mkdir_with_parents (cachedir, 0775)) {
+        g_warning ("Failed to mkdir %s: %s", cachedir, g_strerror (errno));
+        g_free (cachedir);
+        return FALSE;
+    }
     g_free (cachedir);
 
     variant = ibus_serializable_serialize (IBUS_SERIALIZABLE (registry));

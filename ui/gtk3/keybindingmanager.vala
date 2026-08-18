@@ -18,23 +18,6 @@ public class KeybindingManager : GLib.Object {
 
     private static KeybindingManager m_instance = null;
 
-    public const uint MODIFIER_FILTER =
-        Gdk.ModifierType.MODIFIER_MASK & ~(
-        Gdk.ModifierType.LOCK_MASK |  // Caps Lock
-        // Gdk.ModifierType.MOD1_MASK |  // Alt
-        Gdk.ModifierType.MOD2_MASK |  // Num Lock
-        // Gdk.ModifierType.MOD3_MASK |
-        // Gdk.ModifierType.MOD4_MASK |  // Super, Hyper
-        // Gdk.ModifierType.MOD5_MASK |  //
-        Gdk.ModifierType.BUTTON1_MASK |
-        Gdk.ModifierType.BUTTON2_MASK |
-        Gdk.ModifierType.BUTTON3_MASK |
-        Gdk.ModifierType.BUTTON4_MASK |
-        Gdk.ModifierType.BUTTON5_MASK |
-        Gdk.ModifierType.SUPER_MASK |
-        Gdk.ModifierType.HYPER_MASK |
-        Gdk.ModifierType.META_MASK);
-
     /**
      * Helper class to store keybinding
      */
@@ -60,10 +43,12 @@ public class KeybindingManager : GLib.Object {
     public delegate void KeybindingHandlerFunc(Gdk.Event event);
 
 
-    private  KeybindingManager() {
-        Gdk.Event.handler_set(event_handler);
+    private  KeybindingManager(bool is_wayland_im) {
+        if (!is_wayland_im)
+            Gdk.Event.handler_set(event_handler);
     }
 
+#if ENABLE_XIM
     /**
      * Bind accelerator to given handler
      *
@@ -74,18 +59,8 @@ public class KeybindingManager : GLib.Object {
     public bool bind(uint keysym,
                      Gdk.ModifierType modifiers,
                      KeybindingHandlerFunc handler) {
-#if VALA_0_24
-        unowned X.Display display = Gdk.X11.get_default_xdisplay();
-#else
-        unowned X.Display display = Gdk.x11_get_default_xdisplay();
-#endif
-
-        int keycode = display.keysym_to_keycode(keysym);
-
-        if (keycode == 0)
+        if (!grab_keycode (keysym, modifiers))
             return false;
-
-        grab_keycode (Gdk.Display.get_default(), keysym, modifiers);
 
         // store binding
         Keybinding binding = new Keybinding(keysym, modifiers, handler);
@@ -106,8 +81,7 @@ public class KeybindingManager : GLib.Object {
         GLib.List<Keybinding> remove_bindings = new GLib.List<Keybinding>();
         foreach(Keybinding binding in m_bindings) {
             if (binding.keysym == keysym && binding.modifiers == modifiers) {
-                ungrab_keycode (Gdk.Display.get_default(),
-                                binding.keysym,
+                ungrab_keycode (binding.keysym,
                                 binding.modifiers);
                 remove_bindings.append(binding);
             }
@@ -117,10 +91,11 @@ public class KeybindingManager : GLib.Object {
         foreach (Keybinding binding in remove_bindings)
             m_bindings.remove (binding);
     }
+#endif
 
-    public static KeybindingManager get_instance () {
+    public static KeybindingManager get_instance (bool is_wayland_im=false) {
         if (m_instance == null)
-            m_instance = new KeybindingManager ();
+            m_instance = new KeybindingManager (is_wayland_im);
         return m_instance;
     }
 
@@ -199,7 +174,7 @@ public class KeybindingManager : GLib.Object {
             }
 
             if (event.type == Gdk.EventType.KEY_PRESS) {
-                uint modifiers = event.key.state & MODIFIER_FILTER;
+                uint modifiers = event.key.state & IBus.MODIFIER_FILTER;
                 uint keyval = event.key.keyval;
                 if (keyval >= IBus.KEY_A && keyval <= IBus.KEY_Z &&
                     (modifiers & Gdk.ModifierType.SHIFT_MASK) != 0) {
@@ -217,6 +192,7 @@ public class KeybindingManager : GLib.Object {
         Gtk.main_do_event(event);
     }
 
+#if ENABLE_XIM
     // Get union of given modifiers and all the combination of the
     // modifiers in ignored_modifiers.
     XI.GrabModifiers[] get_grab_modifiers(uint modifiers) {
@@ -248,13 +224,11 @@ public class KeybindingManager : GLib.Object {
         return ximodifiers;
     }
 
-    bool grab_keycode(Gdk.Display display, uint keyval, uint modifiers) {
-#if VALA_0_24
-        unowned X.Display xdisplay =
-                (display as Gdk.X11.Display).get_xdisplay();
-#else
-        unowned X.Display xdisplay = Gdk.X11Display.get_xdisplay(display);
-#endif
+    bool grab_keycode(uint keyval, uint modifiers) {
+        Gdk.X11.Display display = BindingCommon.get_xdisplay();
+        if (display == null)
+            return false;
+        unowned X.Display xdisplay = display.get_xdisplay();
         int keycode = xdisplay.keysym_to_keycode(keyval);
         if (keycode == 0) {
             warning("Can not convert keyval=%u to keycode!", keyval);
@@ -277,17 +251,15 @@ public class KeybindingManager : GLib.Object {
                                       true,
                                       evmask,
                                       get_grab_modifiers(modifiers));
-            
+        evmask.mask = null;
         return retval == 0;
     }
 
-    bool ungrab_keycode(Gdk.Display display, uint keyval, uint modifiers) {
-#if VALA_0_24
-        unowned X.Display xdisplay =
-                (display as Gdk.X11.Display).get_xdisplay();
-#else
-        unowned X.Display xdisplay = Gdk.X11Display.get_xdisplay(display);
-#endif
+    bool ungrab_keycode(uint keyval, uint modifiers) {
+        Gdk.X11.Display display = BindingCommon.get_xdisplay();
+        if (display == null)
+            return false;
+        unowned X.Display xdisplay = display.get_xdisplay();
         int keycode = xdisplay.keysym_to_keycode(keyval);
         if (keycode == 0) {
             warning("Can not convert keyval=%u to keycode!", keyval);
@@ -302,6 +274,7 @@ public class KeybindingManager : GLib.Object {
 
         return retval == 0;
     }
+#endif
 }
 
 /*

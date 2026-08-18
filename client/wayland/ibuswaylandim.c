@@ -1,0 +1,3947 @@
+/* -*- mode: C; c-basic-offset: 4; indent-tabs-mode: nil; -*- */
+/* vim:set et sts=4: */
+/* ibus - The Input Bus
+ * Copyright (C) 2019-2026 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2013 Intel Corporation
+ * Copyright (C) 2013-2025 Red Hat, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public License
+ * as published by the Free Software Foundation; either version 2.1 of
+ * the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301 USA.
+ */
+
+#include "config.h"
+
+#include <errno.h>
+#include <glib-object.h>
+#include <ibus.h>
+#include <ibusinternal.h>
+#include <limits.h>
+#include <string.h>
+#include <sys/time.h>
+#include <wayland-client.h>
+#include <xkbcommon/xkbcommon.h>
+
+#include "input-method-unstable-v1-client-protocol.h"
+#include "input-method-unstable-v2-client-protocol.h"
+#include "text-input-unstable-v1-client-protocol.h"
+#include "text-input-unstable-v3-client-protocol.h"
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
+#include "ibuswaylandim.h"
+
+#define IBUS_KEYMAP_MAX_LEVELS 5
+
+/* keysym & keycode should not be logged for the security issue. */
+/* #define IBUS_LOG_SHOW_KEYSYM */
+
+#define clear_keycode2sym(keycode2sym)                                        \
+{                                                                             \
+    guint **_keycode2sym;                                                     \
+    if (G_LIKELY (keycode2sym)) {                                             \
+        _keycode2sym = *(keycode2sym);                                        \
+        if (_keycode2sym) {                                                   \
+            guint max_keycode, i;                                             \
+            if (G_LIKELY (_keycode2sym[0])) {                                 \
+                max_keycode = _keycode2sym[0][0];                             \
+                if (G_UNLIKELY (max_keycode == 0))                            \
+                    g_warning ("The memory of keycode2sym[0] is leaked");     \
+                for (i = 0; i <= max_keycode; ++i) {                          \
+                    g_slice_free1 (sizeof (guint) * IBUS_KEYMAP_MAX_LEVELS,   \
+                                   _keycode2sym[i]);                          \
+                }                                                             \
+                g_slice_free1 (sizeof (guint *) * (max_keycode + 1),          \
+                               _keycode2sym);                                 \
+            } else {                                                          \
+                g_warning ("The memory of keycode2sym is leaked");            \
+            }                                                                 \
+            *(keycode2sym) = NULL;                                            \
+        }                                                                     \
+    }                                                                         \
+}
+
+
+enum {
+    PROP_0 = 0,
+    PROP_BUS,
+    PROP_DISPLAY,
+    PROP_LOG,
+    PROP_VERBOSE,
+    PROP_USE_SYS_KEYMAP
+};
+
+enum {
+    IBUS_FOCUS_IN,
+    IBUS_FOCUS_OUT,
+    LAST_SIGNAL,
+};
+
+typedef enum
+{
+    INPUT_METHOD_V1,
+    INPUT_METHOD_V2,
+} IMProtocolVersion;
+
+typedef enum {
+    IBUS_KEY_ISO_LEVEL_INVALID,
+    IBUS_KEY_ISO_LEVEL_2,
+    IBUS_KEY_ISO_LEVEL_3,
+    IBUS_KEY_ISO_LEVEL_5
+} IBusKeyIsoLevelValue;
+
+typedef enum {
+    IBUS_KEY_ISO_LEVEL_STATE_RELEASE,
+    IBUS_KEY_ISO_LEVEL_STATE_SHIFT,
+    IBUS_KEY_ISO_LEVEL_STATE_LATCH
+} IBusKeyIsoLevelState;
+
+struct zwp_input_method_context_union {
+    union {
+        struct zwp_input_method_context_v1 *context_v1;
+        struct zwp_input_method_v2 *input_method_v2;
+    } u;
+};
+
+struct zwp_keyboard_union {
+    union {
+        struct wl_keyboard *keyboard_v1;
+        struct zwp_input_method_keyboard_grab_v2 *keyboard_v2;
+    } u;
+};
+
+struct zwp_input_method_union {
+    union {
+        struct zwp_input_method_v1 *input_method_v1;
+        struct zwp_input_method_v2 *input_method_v2;
+    } u;
+};
+
+typedef struct _IBusWaylandSeat IBusWaylandSeat;
+struct _IBusWaylandSeat
+{
+    struct wl_seat *seat;
+    uint32_t wl_name;
+    char *name;
+
+    /* Input Method V2 */
+    struct zwp_input_method_v2 *input_method_v2;
+    struct zwp_input_method_keyboard_grab_v2 *keyboard_v2;
+    struct zwp_virtual_keyboard_v1 *virtual_keyboard;
+    struct zwp_input_popup_surface_v2 *input_popup_surface;
+    gboolean active;
+    gboolean pending_activate;
+    gboolean pending_deactivate;
+    gboolean has_compositor_keymap;
+};
+
+typedef struct _IBusXkbKeymap
+{
+    struct xkb_keymap *keymap;
+    struct xkb_state *state;
+    guint **keycode2sym;
+
+    xkb_mod_mask_t shift_mask;
+    xkb_mod_mask_t lock_mask;
+    xkb_mod_mask_t control_mask;
+    xkb_mod_mask_t mod1_mask;
+    xkb_mod_mask_t mod2_mask;
+    xkb_mod_mask_t mod3_mask;
+    xkb_mod_mask_t mod4_mask;
+    xkb_mod_mask_t mod5_mask;
+    xkb_mod_mask_t super_mask;
+    xkb_mod_mask_t hyper_mask;
+    xkb_mod_mask_t meta_mask;
+} IBusXkbKeymap;
+
+typedef struct _IBusWaylandIMPrivate IBusWaylandIMPrivate;
+struct _IBusWaylandIMPrivate
+{
+    FILE *log;
+    gboolean verbose;
+    gboolean use_sys_keymap;
+    struct wl_display *display;
+    IMProtocolVersion version;
+
+    GPtrArray *seats;
+    IBusWaylandSeat *seat;
+
+    /* Input Method V1 */
+    struct zwp_input_method_v1 *input_method_v1;
+    struct zwp_input_method_context_v1 *context;
+    struct wl_keyboard *keyboard_v1;
+    struct zwp_input_panel_v1 *panel;
+    struct zwp_input_panel_surface_v1 *panel_surface;
+
+    /* Input Method V2 */
+    struct zwp_input_method_manager_v2 *input_method_manager_v2;
+
+    IBusBus *ibusbus;
+    IBusInputContext *ibuscontext;
+    IBusText *preedit_text;
+    guint preedit_cursor_pos;
+    guint preedit_mode;
+    IBusModifierType modifiers;
+    gboolean is_virtual_latch_state;
+    gboolean hiding_preedit_text;
+    IBusInputHints ibus_hints;
+    IBusInputPurpose ibus_purpose;
+
+#if ENABLE_SURROUNDING
+    IBusText *surrounding_text;
+    guint surrounding_cursor_pos;
+#endif
+
+    struct xkb_context *xkb_context;
+
+    IBusXkbKeymap key_user;
+    IBusXkbKeymap key_sys;
+    IBusKeyIsoLevelState iso_level3_state;
+    IBusKeyIsoLevelState iso_level5_state;
+
+    uint32_t im_serial;
+    int32_t repeat_rate;
+    int32_t repeat_delay;
+    xkb_keysym_t pressed_dead_key;
+    xkb_keysym_t released_dead_key_wo_press;
+
+    GCancellable *cancellable;
+};
+
+struct _IBusWaylandKeyEvent
+{
+    struct zwp_input_method_context_v1 *context;
+    uint32_t key_serial;
+    uint32_t time;
+    uint32_t key;
+    enum wl_keyboard_key_state state;
+    xkb_keysym_t sym;
+    uint32_t modifiers;
+    IBusWaylandIM *wlim;
+    int count;
+    guint count_cb_id;
+    guint repeat_rate_id;
+    char *ibus_object_path;
+    gboolean retval;
+};
+typedef struct _IBusWaylandKeyEvent IBusWaylandKeyEvent;
+
+struct _IBusWaylandSource
+{
+    GSource source;
+    GPollFD pfd;
+    uint32_t mask;
+    struct wl_display *display;
+};
+typedef struct _IBusWaylandSource IBusWaylandSource;
+
+G_DEFINE_TYPE_WITH_PRIVATE (IBusWaylandIM, ibus_wayland_im, IBUS_TYPE_OBJECT)
+
+static struct wl_registry *_registry;
+static struct zwp_virtual_keyboard_manager_v1  *_virtual_keyboard_manager;
+
+static char _use_sync_mode = 1;
+
+static guint wayland_im_signals[LAST_SIGNAL] = { 0 };
+
+static GObject     *ibus_wayland_im_constructor        (GType          type,
+                                                        guint          n_params,
+                                                        GObjectConstructParam
+                                                                      *params);
+static void         ibus_wayland_im_set_property       (IBusWaylandIM *wlim,
+                                                        guint          prop_id,
+                                                        const GValue  *value,
+                                                        GParamSpec    *pspec);
+static void         ibus_wayland_im_get_property       (IBusWaylandIM *wlim,
+                                                        guint          prop_id,
+                                                        GValue        *value,
+                                                        GParamSpec    *pspec);
+static void         ibus_wayland_im_destroy            (IBusObject    *object);
+static gboolean     ibus_wayland_im_post_key           (IBusWaylandIM *wlim,
+                                                        uint32_t       key,
+                                                        uint32_t
+                                                                      modifiers,
+                                                        uint32_t       state,
+                                                        xkb_keysym_t   sym,
+                                                        gboolean
+                                                                      filtered);
+static void         input_method_deactivate
+                              (void                               *data,
+                               struct zwp_input_method_union      *input_method,
+                               struct zwp_input_method_context_v1 *context);
+static void         input_method_keyboard_modifiers
+                              (void                               *data,
+                               struct zwp_keyboard_union          *keyboard,
+                               uint32_t                            key_serial,
+                               uint32_t
+                                                                 mods_depressed,
+                               uint32_t                            mods_latched,
+                               uint32_t                            mods_locked,
+                               uint32_t                            group);
+
+
+static char
+_get_char_env (const gchar *name,
+               char         defval)
+{
+    const gchar *value = g_getenv (name);
+
+    if (value == NULL)
+        return defval;
+
+    if (g_strcmp0 (value, "") == 0 ||
+        g_strcmp0 (value, "0") == 0 ||
+        g_strcmp0 (value, "false") == 0 ||
+        g_strcmp0 (value, "False") == 0 ||
+        g_strcmp0 (value, "FALSE") == 0) {
+        return 0;
+    } else if (!g_strcmp0 (value, "2")) {
+        return 2;
+    }
+
+    return 1;
+}
+
+
+static void
+keymap_calc_keysym_cb (struct xkb_keymap *keymap,
+                       xkb_keycode_t      keycode,
+                       void              *data)
+{
+    IBusXkbKeymap *active_key = (IBusXkbKeymap *)data;
+    const xkb_keysym_t *syms = NULL;
+    guint levels, num_syms, i;
+
+    g_assert (active_key);
+    g_assert (active_key->keymap == keymap);
+    g_assert (active_key->state);
+
+    levels = xkb_keymap_num_levels_for_key (active_key->keymap, keycode, 0);
+    if (levels > IBUS_KEYMAP_MAX_LEVELS) {
+        g_warning ("keymap levels %u are higher than %u",
+                   levels, IBUS_KEYMAP_MAX_LEVELS);
+    }
+    for (i = 0; i < levels && i < IBUS_KEYMAP_MAX_LEVELS; ++i) {
+        num_syms = xkb_keymap_key_get_syms_by_level (active_key->keymap,
+                                                     keycode,
+                                                     0,
+                                                     i,
+                                                     &syms);
+        if (num_syms > 0)
+            active_key->keycode2sym[keycode][i] = syms[0];
+        else
+            active_key->keycode2sym[keycode][i] = XKB_KEY_NoSymbol;
+    }
+    for (; i < IBUS_KEYMAP_MAX_LEVELS; ++i)
+        active_key->keycode2sym[keycode][i] = XKB_KEY_NoSymbol;
+}
+
+
+static guint
+keycode2sym_get_keysym (guint         **keycode2sym,
+                        guint           keyval,
+                        xkb_mod_mask_t *latched_mods)
+{
+    guint keycode = 0;
+    guint max_keycode, min_keycode, i, j;
+
+    g_assert (keycode2sym);
+    g_assert (latched_mods);
+    g_return_val_if_fail (keycode2sym[0], 0);
+    max_keycode = keycode2sym[0][0];
+    min_keycode = keycode2sym[0][1];
+    *latched_mods = 0;
+    for (i = min_keycode; i <= max_keycode && !keycode; ++i) {
+        for (j = 0; j < IBUS_KEYMAP_MAX_LEVELS; ++j) {
+            if (keyval == keycode2sym[i][j]) {
+                keycode = i;
+                if (j)
+                    *latched_mods |= (1 << (j - 1));
+                return keycode;
+            }
+        }
+    }
+    return 0;
+}
+
+
+static xkb_mod_mask_t
+ibus_xkb_keymap_mods_to_xkb_mods (IBusXkbKeymap  *active_key,
+                                  guint modifiers)
+{
+    xkb_mod_mask_t mask = 0;
+
+    g_assert (active_key);
+    if (modifiers & IBUS_SHIFT_MASK)
+        mask |= active_key->shift_mask;
+    if (modifiers & IBUS_CONTROL_MASK)
+        mask |= active_key->control_mask;
+    if (modifiers & IBUS_MOD1_MASK)
+        mask |= active_key->mod1_mask;
+    if (modifiers & IBUS_MOD2_MASK)
+        mask |= active_key->mod2_mask;
+    if (modifiers & IBUS_MOD3_MASK)
+        mask |= active_key->mod3_mask;
+    if (modifiers & IBUS_MOD4_MASK)
+        mask |= active_key->mod4_mask;
+    if (modifiers & IBUS_MOD5_MASK)
+        mask |= active_key->mod5_mask;
+    if (modifiers & IBUS_SUPER_MASK)
+        mask |= active_key->super_mask;
+    if (modifiers & IBUS_HYPER_MASK)
+        mask |= active_key->hyper_mask;
+    if (modifiers & IBUS_META_MASK)
+        mask |= active_key->meta_mask;
+    return mask;
+}
+
+
+static void
+ibus_xkb_keymap_gen_keycode2sym (IBusXkbKeymap  *active_key)
+{
+    guint max_keycode, min_keycode, i;
+
+    g_assert (active_key);
+    g_assert (active_key->keymap);
+    g_assert (!active_key->keycode2sym);
+    g_return_if_fail (active_key->state);
+
+    max_keycode = xkb_keymap_max_keycode (active_key->keymap);
+    min_keycode = xkb_keymap_min_keycode (active_key->keymap);
+    if (min_keycode == 0)
+        g_warning ("The keymap has minimum keycode 0");
+    active_key->keycode2sym = (guint **)g_slice_alloc (
+        sizeof (guint *) * (max_keycode + 1));
+    g_return_if_fail (active_key->keycode2sym);
+    for (i = 0; i <= max_keycode; ++i) {
+        active_key->keycode2sym[i] = (guint *)g_slice_alloc (
+                sizeof (guint) * IBUS_KEYMAP_MAX_LEVELS);
+    }
+    g_return_if_fail (active_key->keycode2sym[0]);
+    active_key->keycode2sym[0][0] = max_keycode;
+    active_key->keycode2sym[0][1] = min_keycode;
+    xkb_keymap_key_for_each (active_key->keymap,
+                             keymap_calc_keysym_cb,
+                             active_key);
+}
+
+
+static gboolean
+ibus_wayland_source_prepare (GSource *base,
+                             gint    *timeout)
+{
+    IBusWaylandSource *source = (IBusWaylandSource *)base;
+
+    *timeout = -1;
+
+    wl_display_flush (source->display);
+
+    return FALSE;
+}
+
+
+static gboolean
+ibus_wayland_source_check (GSource *base)
+{
+    IBusWaylandSource *source = (IBusWaylandSource *)base;
+
+    if (source->pfd.revents & (G_IO_ERR | G_IO_HUP))
+        g_error ("Lost connection to wayland compositor");
+
+    return source->pfd.revents;
+}
+
+
+static gboolean
+ibus_wayland_source_dispatch (GSource    *base,
+                              GSourceFunc callback,
+                              gpointer    data)
+{
+    IBusWaylandSource *source = (IBusWaylandSource *)base;
+
+    if (source->pfd.revents) {
+        wl_display_dispatch (source->display);
+        source->pfd.revents = 0;
+    }
+
+    return TRUE;
+}
+
+
+static void
+ibus_wayland_source_finalize (GSource *source)
+{
+}
+
+
+static GSourceFuncs ibus_wayland_source_funcs = {
+    ibus_wayland_source_prepare,
+    ibus_wayland_source_check,
+    ibus_wayland_source_dispatch,
+    ibus_wayland_source_finalize
+};
+
+
+GSource *
+ibus_wayland_source_new (struct wl_display *display)
+{
+    GSource *source;
+    IBusWaylandSource *wlsource;
+
+    source = g_source_new (&ibus_wayland_source_funcs,
+                           sizeof (IBusWaylandSource));
+    wlsource = (IBusWaylandSource *) source;
+
+    wlsource->display = display;
+    wlsource->pfd.fd = wl_display_get_fd (display);
+    wlsource->pfd.events = G_IO_IN | G_IO_ERR | G_IO_HUP;
+    g_source_add_poll (source, &wlsource->pfd);
+
+    return source;
+}
+
+
+static void
+ibus_wayland_im_reset_modifiers (IBusWaylandIM *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    xkb_mod_mask_t mods_locked = 0;
+    xkb_layout_index_t  group = 0;
+
+    g_assert (IBUS_IS_WAYLAND_IM (wlim));
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->is_virtual_latch_state = FALSE;
+    priv->iso_level3_state = IBUS_KEY_ISO_LEVEL_STATE_RELEASE;
+    priv->iso_level5_state = IBUS_KEY_ISO_LEVEL_STATE_RELEASE;
+    priv->pressed_dead_key = 0;
+    priv->released_dead_key_wo_press = 0;
+    if (priv->key_user.state && priv->key_sys.state) {
+        mods_locked = xkb_state_serialize_mods (priv->key_sys.state,
+                                                XKB_STATE_LOCKED);
+        group = xkb_state_serialize_layout (priv->key_sys.state,
+                                            XKB_STATE_LAYOUT_LOCKED);
+        input_method_keyboard_modifiers (wlim, NULL, 0, 0, 0,
+                                         mods_locked,
+                                         group);
+    } else {
+        priv->modifiers &= IBUS_LOCK_MASK;
+    }
+}
+
+
+static void
+ibus_wayland_im_commit_text (IBusWaylandIM *wlim,
+                             const char    *str)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_commit_string (priv->context,
+                                                   priv->im_serial,
+                                                   str);
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat)
+            break;
+        zwp_input_method_v2_commit_string (priv->seat->input_method_v2, str);
+        zwp_input_method_v2_commit (priv->seat->input_method_v2,
+                                    priv->im_serial);
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static gboolean
+ibus_wayland_im_commit_key_event (IBusWaylandIM  *wlim,
+                                  uint32_t        key,
+                                  uint32_t        modifiers,
+                                  uint32_t        state,
+                                  xkb_keysym_t    sym,
+                                  IBusXkbKeymap  *active_key,
+                                  gboolean        filtered,
+                                  xkb_mod_mask_t *new_mods_depressed,
+                                  gboolean       *clear_virtual_state,
+                                  gboolean       *is_invalid_key)
+{
+    IBusWaylandIMPrivate *priv;
+    uint32_t code = key + 8;
+    uint32_t ch;
+
+    g_return_val_if_fail (IBUS_IS_WAYLAND_IM (wlim), filtered);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    ch = ibus_keyval_to_unicode (sym);
+    if (ch == 0 || g_unichar_iscntrl (ch))
+        ch = xkb_state_key_get_utf32 (active_key->state, code);
+
+/* No text with Control & Alt & Super keys */
+#ifndef GDK_WINDOWING_QUARTZ
+#  define _IBUS_NO_TEXT_INPUT_MOD_MASK (\
+    IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_MOD4_MASK)
+#else
+#  define _IBUS_NO_TEXT_INPUT_MOD_MASK (\
+    IBUS_CONTROL_MASK | IBUS_MOD2_MASK | IBUS_MOD4_MASK)
+#endif
+    if ((state == WL_KEYBOARD_KEY_STATE_RELEASED) ||
+        (modifiers & _IBUS_NO_TEXT_INPUT_MOD_MASK)) {
+        return filtered;
+    }
+#undef _IBUS_NO_TEXT_INPUT_MOD_MASK
+
+    /* In case `use_sys_keymap` is %TRUE, IBus does not commit ASCII chars
+     * but forwards the key events to the focused application here.
+     * Because some applications treat the printable keys as control keys,
+     * E.g. game apps "hjkl" use the cursor move like VI mode.
+     * Unfortunately the Wayland input-method protocol does not provide
+     * the fallback logic after apps handle the key events like GTK3/2
+     * IM modules. But the input-method always should handle key events
+     * prior to apps.
+     */
+    if (!filtered && !g_unichar_iscntrl (ch) && !priv->use_sys_keymap) {
+        gchar buff[8] = { 0, };
+        g_unichar_to_utf8 (ch, buff);
+        ibus_wayland_im_commit_text (wlim, buff);
+        filtered = TRUE;
+    }
+    if (!g_unichar_iscntrl (ch) || IS_DEAD_KEY (sym)) {
+        /* If `filtered` is %TRUE, the keysym can be eaten for the compose
+         * preedit by IBus XKB engine. E.g. AltGr-Shift-V key produces
+         * `Level3_Shift' and `Greek_OMEGA` keysym with "us(symbolic)" keymap.
+         * However if you configure multiple keymaps, AltGr-Shift may produce
+         * the keymap switch although AltGr-Shift-V produces `Greek_OMEGA`.
+         * I'm not clarified with "level3(ralt_switch)" in us XKB keymaps.
+         */
+        if (modifiers & IBUS_MOD3_MASK) {
+            /* With the "fr(ergol)" keymap, Typing the key <AD09> twice
+             * produces the "ISO_Level5_Latch" keysym for the first KeyPress
+             * and the "dead_diaeresis" keysym for the first KeyReleease
+             * because the release key event has MOD3(level5) state.
+             * And the second KeyPress has the "dead_diaeresis" keysym and
+             * the second KeyRelease has the "ISO_Level5_Latch" keysym.
+             * The latch state should be cleared with the dead keys.
+             * I downgrade the latch state to the shift state here and
+             * the shift state will be cleared by the released
+             * "ISO_Level5_Latch" keysym but not the pressed dead keys
+             * because xkb_state_update_key() will revert the MOD3(level5)
+             * state of the depressed xkb_state_serialize_mods()
+             * with the dead keys.
+             */
+            if (priv->iso_level5_state == IBUS_KEY_ISO_LEVEL_STATE_LATCH) {
+                priv->iso_level5_state = IBUS_KEY_ISO_LEVEL_STATE_SHIFT;
+                if (is_invalid_key)
+                    *is_invalid_key = TRUE;
+            } else if (clear_virtual_state) {
+                *clear_virtual_state = TRUE;
+            }
+            if (new_mods_depressed)
+                *new_mods_depressed &= ~active_key->mod3_mask;
+        }
+        if (modifiers & IBUS_MOD5_MASK) {
+            if (priv->iso_level3_state == IBUS_KEY_ISO_LEVEL_STATE_LATCH) {
+                priv->iso_level3_state = IBUS_KEY_ISO_LEVEL_STATE_SHIFT;
+                if (is_invalid_key)
+                    *is_invalid_key = TRUE;
+            } else if (clear_virtual_state) {
+                *clear_virtual_state = TRUE;
+            }
+            if (new_mods_depressed)
+                *new_mods_depressed &= ~active_key->mod5_mask;
+        }
+    }
+    return filtered;
+}
+
+
+static void
+ibus_wayland_im_keycode (IBusWaylandIM *wlim,
+                         uint32_t       key_serial,
+                         uint32_t       time,
+                         uint32_t       key,
+                         uint32_t       state)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_key (priv->context,
+                                         key_serial,
+                                         time,
+                                         key,
+                                         state);
+        break;
+    case INPUT_METHOD_V2:
+        /* wlroots/types/wlr_virtual_keyboard_v1.c:virtual_keyboard_key()
+         * returns "Cannot send a keypress before defining a keymap"
+         * if `has_compositor_keymap` is %FALSE.
+         */
+        if (!priv->seat)
+            break;
+        if (priv->seat->has_compositor_keymap) {
+            zwp_virtual_keyboard_v1_key (priv->seat->virtual_keyboard,
+                                         time, key, state);
+        }
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static void
+ibus_wayland_im_keycode_with_latch (IBusWaylandIM *wlim,
+                                    uint32_t       key_serial,
+                                    uint32_t       time,
+                                    uint32_t       key,
+                                    uint32_t       state,
+                                    xkb_mod_mask_t latched_mods)
+{
+    IBusWaylandIMPrivate *priv;
+    xkb_mod_mask_t orig_depressed_mods = 0;
+    xkb_mod_mask_t orig_latched_mods = 0;
+    xkb_mod_mask_t orig_locked_mods = 0;
+    xkb_layout_index_t orig_latched_group = 0;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->key_user.state) {
+        orig_depressed_mods =
+                xkb_state_serialize_mods (priv->key_user.state,
+                                          XKB_STATE_MODS_DEPRESSED);
+        orig_latched_mods = xkb_state_serialize_mods (priv->key_user.state,
+                                                      XKB_STATE_MODS_LATCHED);
+        orig_locked_mods = xkb_state_serialize_mods (priv->key_user.state,
+                                                     XKB_STATE_MODS_LOCKED);
+        orig_latched_group =
+                xkb_state_serialize_layout (priv->key_user.state,
+                                            XKB_STATE_LAYOUT_EFFECTIVE);
+        xkb_state_update_mask (priv->key_user.state,
+                               latched_mods, latched_mods,
+                               0,
+                               0,
+                               orig_latched_group,
+                               orig_latched_group);
+        zwp_virtual_keyboard_v1_modifiers (
+                    priv->seat->virtual_keyboard,
+                    latched_mods,
+                    latched_mods,
+                    0,
+                    orig_latched_group);
+    }
+    ibus_wayland_im_keycode (wlim, key_serial, time, key, state);
+    if (orig_depressed_mods || orig_latched_mods || orig_locked_mods ||
+        orig_latched_group) {
+        xkb_state_update_mask (priv->key_user.state,
+                               orig_depressed_mods,
+                               orig_latched_mods,
+                               orig_locked_mods,
+                               0,
+                               orig_latched_group,
+                               orig_latched_group);
+        zwp_virtual_keyboard_v1_modifiers (
+                    priv->seat->virtual_keyboard,
+                    orig_depressed_mods,
+                    orig_latched_mods,
+                    orig_locked_mods,
+                    orig_latched_group);
+    }
+}
+
+
+static void
+ibus_wayland_im_forward_key_event (IBusWaylandIM *wlim,
+                                   uint32_t       im_serial,
+                                   guint          keyval,
+                                   guint          keycode,
+                                   uint32_t       state,
+                                   guint          modifiers)
+{
+    IBusWaylandIMPrivate *priv;
+    IBusXkbKeymap  *active_key = NULL;
+    xkb_mod_mask_t latched_mods = 0;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_keysym (priv->context,
+                                            im_serial,
+                                            0,
+                                            keyval,
+                                            state,
+                                            modifiers);
+        break;
+    case INPUT_METHOD_V2:
+        if (!keycode && keyval) {
+            active_key = NULL;
+            if (priv->key_user.state) {
+                active_key = &priv->key_user;
+                if (!active_key->keycode2sym)
+                    ibus_xkb_keymap_gen_keycode2sym (active_key);
+            }
+            if (active_key && active_key->keycode2sym) {
+                if (active_key->state) {
+                    latched_mods = ibus_xkb_keymap_mods_to_xkb_mods (
+                            active_key,
+                            modifiers);
+                }
+                keycode = keycode2sym_get_keysym (active_key->keycode2sym,
+                                                  keyval,
+                                                  &latched_mods);
+            }
+            if (!keycode) {
+                active_key = NULL;
+                if (priv->key_sys.state) {
+                    active_key = &priv->key_sys;
+                    if (!active_key->keycode2sym)
+                        ibus_xkb_keymap_gen_keycode2sym (active_key);
+                }
+                if (active_key && active_key->keycode2sym) {
+                    if (active_key->state) {
+                        latched_mods = ibus_xkb_keymap_mods_to_xkb_mods (
+                                active_key,
+                                modifiers);
+                    }
+                    keycode = keycode2sym_get_keysym (active_key->keycode2sym,
+                                                      keyval,
+                                                      &latched_mods);
+                }
+            }
+            if (!keycode) {
+                g_warning ("Failed to get keycode from keysym 0x%X", keyval);
+                active_key = NULL;
+                break;
+            }
+        } else if (keycode) {
+            active_key = NULL;
+            if (priv->key_user.state)
+                active_key = &priv->key_user;
+            else if (priv->key_sys.state)
+                active_key = &priv->key_sys;
+            if (active_key->state) {
+                latched_mods = ibus_xkb_keymap_mods_to_xkb_mods (
+                        active_key,
+                        modifiers);
+            }
+        }
+        ibus_wayland_im_keycode_with_latch (wlim,
+                                            priv->im_serial,
+                                            0,
+                                            keycode - 8,
+                                            state,
+                                            latched_mods);
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+/**
+ * ibus_wayland_im_update_virtual_depressed:
+ *
+ * If the IBus keymap is different from the compositor keymap,
+ * IBus needs to maintain the modifiers state by itself to call
+ * xkb_state_update_mask(), E.g. IBus keymap is "lv(tilde)" and the system
+ * one is "us", because input_method_keyboard_modifiers()
+ * is not called by the Wayland compositor in that case.
+ * So this API updates @mods_depressed with ISO level3 and level5
+ * latch and shift states, and send it to
+ * ibus_wayland_im_update_virtual_xkb_state().
+ */
+static gboolean
+ibus_wayland_im_update_virtual_depressed (IBusWaylandIM  *wlim,
+                                          uint32_t        key,
+                                          uint32_t        modifiers,
+                                          uint32_t        state,
+                                          xkb_keysym_t    sym,
+                                          IBusXkbKeymap  *active_key,
+                                          gboolean        filtered,
+                                          xkb_mod_mask_t *mods_depressed,
+                                          gboolean       *clear_virtual_state,
+                                          gboolean       *is_invalid_key)
+{
+    IBusWaylandIMPrivate *priv;
+    uint32_t code = key + 8;
+    xkb_mod_mask_t new_mods_depressed;
+    xkb_mod_mask_t mods_locked;
+    xkb_keysym_t system_sym = sym;
+
+    if (filtered)
+        return filtered;
+
+    g_assert (IBUS_IS_WAYLAND_IM (wlim));
+    g_assert (active_key);
+    g_assert (mods_depressed);
+    g_assert (clear_virtual_state);
+    g_assert (is_invalid_key);
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    new_mods_depressed = *mods_depressed;
+    mods_locked = xkb_state_serialize_mods (active_key->state,
+                                            XKB_STATE_LOCKED);
+
+    if ((modifiers & ~IBUS_RELEASE_MASK ) !=
+        (new_mods_depressed | mods_locked)) {
+        g_warning ("IBus modifiers %X is different from XKB depressed %X",
+                   modifiers, new_mods_depressed | mods_locked);
+    }
+    if (priv->key_sys.state)
+        system_sym = xkb_state_key_get_one_sym (priv->key_sys.state, code);
+    switch (sym) {
+    case IBUS_KEY_ISO_Level2_Latch:
+        filtered = TRUE;
+        break;
+    /* Level3_latch is caused by TLDE key in lv(tilde) keymap.
+     * Level3_Shift is caused by Alt key in lv(tilde) keymap.
+     * Level5_Latch is caused by Shift+Alt key in de(T3) keymap.
+     */
+    case IBUS_KEY_ISO_Level3_Latch:
+    case IBUS_KEY_ISO_Level3_Shift:
+    case IBUS_KEY_ISO_Level5_Latch:
+    case IBUS_KEY_ISO_Level5_Shift:
+        if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+            switch (sym) {
+            case IBUS_KEY_ISO_Level3_Latch:
+                priv->iso_level3_state = IBUS_KEY_ISO_LEVEL_STATE_LATCH;
+                new_mods_depressed |= active_key->mod5_mask;
+                break;
+            case IBUS_KEY_ISO_Level3_Shift:
+                priv->iso_level3_state = IBUS_KEY_ISO_LEVEL_STATE_SHIFT;
+                new_mods_depressed |= active_key->mod5_mask;
+                break;
+            case IBUS_KEY_ISO_Level5_Latch:
+                priv->iso_level5_state = IBUS_KEY_ISO_LEVEL_STATE_LATCH;
+                new_mods_depressed |= active_key->mod3_mask;
+                break;
+            case IBUS_KEY_ISO_Level5_Shift:
+                priv->iso_level5_state = IBUS_KEY_ISO_LEVEL_STATE_SHIFT;
+                new_mods_depressed |= active_key->mod3_mask;
+                break;
+            default:
+                g_assert_not_reached ();
+            }
+            if (sym != system_sym)
+                priv->is_virtual_latch_state = TRUE;
+            filtered = TRUE;
+        } else {
+            IBusKeyIsoLevelValue current_level = IBUS_KEY_ISO_LEVEL_INVALID;
+            IBusKeyIsoLevelState *current_state = NULL;
+            IBusKeyIsoLevelState *reverse_state = NULL;
+            switch (sym) {
+            case IBUS_KEY_ISO_Level3_Latch:
+            case IBUS_KEY_ISO_Level3_Shift:
+                current_level = IBUS_KEY_ISO_LEVEL_3;
+                current_state = &priv->iso_level3_state;
+                reverse_state = &priv->iso_level5_state;
+                break;
+            case IBUS_KEY_ISO_Level5_Latch:
+            case IBUS_KEY_ISO_Level5_Shift:
+                current_level = IBUS_KEY_ISO_LEVEL_5;
+                current_state = &priv->iso_level5_state;
+                reverse_state = &priv->iso_level3_state;
+                break;
+            default:;
+            }
+            g_assert (current_level != IBUS_KEY_ISO_LEVEL_INVALID);
+            g_assert (current_state && reverse_state);
+            /* The "lv(tilde)" keymap gives the "Level3_Shift" keysym
+             * with the key <RALT>.
+             *
+             * Handle the "ISO_Level5_Latch" keysym in the "fr(ergol)" keymap.
+             * Do not use keysym but `current_state` because the latch state
+             * can be changed to the shift state with some key conditions.
+             */
+            if (*current_state == IBUS_KEY_ISO_LEVEL_STATE_SHIFT) {
+                *current_state = IBUS_KEY_ISO_LEVEL_STATE_RELEASE;
+                if (current_level == IBUS_KEY_ISO_LEVEL_3)
+                    new_mods_depressed &= ~active_key->mod5_mask;
+                else if (current_level == IBUS_KEY_ISO_LEVEL_5)
+                    new_mods_depressed &= ~active_key->mod3_mask;
+                else
+                    g_assert_not_reached ();
+                if (sym != system_sym)
+                    *clear_virtual_state = TRUE;
+            } else if (!*current_state && *reverse_state &&
+                       (((current_level == IBUS_KEY_ISO_LEVEL_3) &&
+                         (new_mods_depressed & active_key->mod3_mask)) ||
+                        ((current_level == IBUS_KEY_ISO_LEVEL_5) &&
+                         (new_mods_depressed & active_key->mod5_mask))
+                       )) {
+                /* The unlikely case !priv->is_pressed_mod3 and
+                 * priv->is_pressed_mod5 means that "de(T3)" keymap gives
+                 * the pressed "Level3_Shift" keysym and
+                 * the released "Level5_Latch" keysym for the key <RALT>.
+                 * This case can happen if the normal keysym and shift keysym
+                 * are different.
+                 */
+                *reverse_state = IBUS_KEY_ISO_LEVEL_STATE_RELEASE;
+                *is_invalid_key = TRUE;
+                if (current_level == IBUS_KEY_ISO_LEVEL_3)
+                    new_mods_depressed &= ~active_key->mod3_mask;
+                else if (current_level == IBUS_KEY_ISO_LEVEL_5)
+                    new_mods_depressed &= ~active_key->mod5_mask;
+                else
+                    g_assert_not_reached ();
+                *clear_virtual_state = TRUE;
+                g_debug ("Got a wrong released %s key without the "
+                         "pressed one. Maybe the next Shift state will "
+                         "produce the delayed pressed one.",
+                         current_level == IBUS_KEY_ISO_LEVEL_3 ?
+                                 "Level3" : "Level5");
+            }
+        }
+        break;
+    case IBUS_KEY_Shift_L:
+    case IBUS_KEY_Shift_R:
+        if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
+            new_mods_depressed |= active_key->shift_mask;
+        else
+            new_mods_depressed &= ~active_key->shift_mask;
+        break;
+    default:;
+    }
+#ifdef IBUS_LOG_SHOW_KEYSYM
+    if (priv->verbose) {
+        fprintf (priv->log, "%s key:%u sym:%x system_sym:%x modifiers:%x "
+                            "state:%s filtered:%d\n",
+                 G_STRFUNC,
+                 key, sym, system_sym, modifiers, state ? "press" : "release",
+                 filtered);
+        fflush (priv->log);
+    }
+#endif
+    *mods_depressed = new_mods_depressed;
+    return filtered;
+}
+
+
+/**
+ * ibus_wayland_im_update_virtual_xkb_state:
+ *
+ * Update virtual IBus xkb_state by KeyPress and KeyRelease.
+ */
+static void
+ibus_wayland_im_update_virtual_xkb_state (IBusWaylandIM *wlim,
+                                          uint32_t       key,
+                                          uint32_t       state,
+                                          IBusXkbKeymap *active_key,
+                                          xkb_mod_mask_t mods_depressed,
+                                          xkb_mod_mask_t new_mods_depressed,
+                                          gboolean       clear_virtual_state,
+                                          gboolean       is_invalid_key)
+{
+    IBusWaylandIMPrivate *priv;
+    uint32_t code = key + 8;
+    xkb_mod_mask_t mods_locked;
+    xkb_layout_index_t  group = 0;
+
+    g_assert (IBUS_IS_WAYLAND_IM (wlim));
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    mods_locked = xkb_state_serialize_mods (active_key->state,
+                                            XKB_STATE_LOCKED);
+    /* XKB group layout is configured in the system keymap but not the
+     * user keymap which always includes a single layout.
+     */
+    if (priv->key_sys.state) {
+        group = xkb_state_serialize_layout (priv->key_sys.state,
+                                            XKB_STATE_LAYOUT_LOCKED);
+    }
+
+    if (priv->is_virtual_latch_state) {
+        if (new_mods_depressed != mods_depressed) {
+            input_method_keyboard_modifiers (wlim, NULL, 0,
+                                             new_mods_depressed,
+                                             0,
+                                             mods_locked,
+                                             group);
+        }
+        if (clear_virtual_state)
+            priv->is_virtual_latch_state = FALSE;
+    }
+    if (G_LIKELY (!is_invalid_key) &&
+        (!priv->is_virtual_latch_state ||
+         (state != WL_KEYBOARD_KEY_STATE_RELEASED))) {
+        xkb_state_update_key (active_key->state, code,
+                              (state == WL_KEYBOARD_KEY_STATE_RELEASED)
+                              ? XKB_KEY_UP : XKB_KEY_DOWN);
+    }
+    if (priv->is_virtual_latch_state &&
+        (new_mods_depressed != mods_depressed) &&
+        (state != WL_KEYBOARD_KEY_STATE_RELEASED)) {
+        xkb_mod_mask_t new2_mods_depressed;
+        new2_mods_depressed = xkb_state_serialize_mods (active_key->state,
+                                                        XKB_STATE_DEPRESSED |
+                                                        XKB_STATE_LATCHED);
+        /* "de(T3)" keymap gives the pressed "Level3_Shift" keysym and
+         * sets both MOD3(Level5) and MOD5(Level3) states after
+         * xkb_state_update_key() is called with the keypress.
+         * FIXME: Should set `is_invalid_key` in this case of the "de(T3)"
+         * keymap too not to call xkb_state_update_key() here?
+         */
+        if (G_UNLIKELY (new_mods_depressed != new2_mods_depressed)) {
+            xkb_state_update_mask (active_key->state, new_mods_depressed,
+                                   0, mods_locked, 0, 0, group);
+        }
+    }
+}
+
+
+static void
+_context_commit_text_cb (IBusInputContext *context,
+                         IBusText         *text,
+                         IBusWaylandIM    *wlim)
+{
+    ibus_wayland_im_commit_text (wlim, text->text);
+}
+
+
+static void
+_context_forward_key_event_cb (IBusInputContext *context,
+                               guint             keyval,
+                               guint             keycode,
+                               guint             modifiers,
+                               IBusWaylandIM    *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    uint32_t state;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (modifiers & IBUS_RELEASE_MASK)
+        state = WL_KEYBOARD_KEY_STATE_RELEASED;
+    else
+        state = WL_KEYBOARD_KEY_STATE_PRESSED;
+
+    ibus_wayland_im_forward_key_event (wlim,
+                                       priv->im_serial,
+                                       keyval,
+                                       keycode,
+                                       state,
+                                       modifiers);
+}
+
+
+/**
+ * ibus_wayland_im_update_preedit_style:
+ * @wlim: An #IBusWaylandIM
+ *
+ * Convert RGB values to IBusAttrPreedit at first.
+ * Convert IBusAttrPreedit to zwp_text_input_v1_preedit_style at second.
+ *
+ * RF. https://github.com/ibus/ibus/wiki/Wayland-Colors
+ */
+static void
+ibus_wayland_im_update_preedit_style (IBusWaylandIM *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    IBusAttrList *attrs;
+    guint i;
+    const char *str;
+    uint32_t whole_wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_DEFAULT;
+    uint32_t prev_start = 0;
+    uint32_t prev_end = 0;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (!priv->preedit_text)
+        return;
+    attrs = priv->preedit_text->attrs;
+    if (!attrs)
+        return;
+    for (i = 0; ; i++) {
+        IBusAttribute *attr = ibus_attr_list_get (attrs, i);
+        IBusAttrPreedit istyle = IBUS_ATTR_PREEDIT_DEFAULT;
+        uint32_t wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_DEFAULT;
+        uint32_t start, end;
+        if (attr == NULL)
+                break;
+        switch (attr->type) {
+        case IBUS_ATTR_TYPE_UNDERLINE:
+            istyle = IBUS_ATTR_PREEDIT_WHOLE;
+            break;
+        case IBUS_ATTR_TYPE_FOREGROUND:
+            switch (attr->value) {
+            case 0x7F7F7F: /* typing-booster */
+                istyle = IBUS_ATTR_PREEDIT_PREDICTION;
+                break;
+            case 0xF90F0F: /* table */
+                istyle = IBUS_ATTR_PREEDIT_PREFIX;
+                break;
+            case 0x1EDC1A: /* table */
+                istyle = IBUS_ATTR_PREEDIT_SUFFIX;
+                break;
+            case 0xA40000: /* typing-booster, table */
+                istyle = IBUS_ATTR_PREEDIT_ERROR_SPELLING;
+                break;
+            case 0xFF00FF: /* typing-booster */
+                istyle = IBUS_ATTR_PREEDIT_ERROR_COMPOSE;
+                break;
+            case 0x0: /* Japanese */
+            case 0xFF000000:
+                break;
+            case 0xFFFFFF: /* hangul */
+            case 0xFFFFFFFF:
+                istyle = IBUS_ATTR_PREEDIT_SELECTION;
+                break;
+            default: /* Custom */
+                istyle = IBUS_ATTR_PREEDIT_NONE;
+            }
+            break;
+        case IBUS_ATTR_TYPE_BACKGROUND:
+            switch (attr->value) {
+            case 0xC8C8F0: /* Japanese */
+            case 0xFFC8C8F0:
+                istyle = IBUS_ATTR_PREEDIT_SELECTION;
+                break;
+            default:; /* Custom */
+            }
+            break;
+        case IBUS_ATTR_TYPE_HINT:
+            istyle = attr->value;
+            break;
+        default:
+            istyle = IBUS_ATTR_PREEDIT_NONE;
+        }
+        switch (istyle) {
+        case IBUS_ATTR_PREEDIT_NONE:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_NONE;
+            break;
+        case IBUS_ATTR_PREEDIT_WHOLE:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_UNDERLINE;
+            break;
+        case IBUS_ATTR_PREEDIT_SELECTION:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_SELECTION;
+            break;
+        case IBUS_ATTR_PREEDIT_PREDICTION:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_INACTIVE;
+            break;
+        case IBUS_ATTR_PREEDIT_PREFIX:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_HIGHLIGHT;
+            break;
+        case IBUS_ATTR_PREEDIT_SUFFIX:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_INACTIVE;
+            break;
+        case IBUS_ATTR_PREEDIT_ERROR_SPELLING:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_INCORRECT;
+            break;
+        case IBUS_ATTR_PREEDIT_ERROR_COMPOSE:
+            wstyle = ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_INCORRECT;
+            break;
+        default:;
+        }
+        if (wstyle == ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_DEFAULT)
+            continue;
+        str = priv->preedit_text->text;
+        start = g_utf8_offset_to_pointer (str, attr->start_index) - str;
+        end = g_utf8_offset_to_pointer (str, attr->end_index) - str;
+        /* Double styles cannot be applied likes the underline and
+         * preedit color. */
+        if (start == 0 && strlen (str) == end &&
+            (i > 0 || ibus_attr_list_get (attrs, i + 1))) {
+            whole_wstyle = wstyle;
+            continue;
+        }
+        if (end < prev_start) {
+            if (priv->log) {
+                fprintf (priv->log,
+                         "Reverse order is not supported in end %d for %s "
+                         "against start %d.\n", end, str, prev_start);
+                fflush (priv->log);
+            }
+            continue;
+        }
+        if (prev_end > end) {
+            if (priv->log) {
+                fprintf (priv->log,
+                         "Nested styles are not supported in end %d for %s "
+                         "against end %d.\n", end, str, prev_end);
+                fflush (priv->log);
+            }
+            continue;
+        }
+        if (prev_end > start && prev_start >= start)
+            start = prev_end;
+        if (start >= end) {
+            if (priv->log) {
+                fprintf (priv->log, "Wrong start %d and end %d for %s.\n",
+                         start, end, str);
+                fflush (priv->log);
+            }
+            return;
+        }
+        zwp_input_method_context_v1_preedit_styling (priv->context,
+                                                     start,
+                                                     end - start,
+                                                     wstyle);
+        prev_start = start;
+        prev_end = end;
+    }
+    if (whole_wstyle != ZWP_TEXT_INPUT_V1_PREEDIT_STYLE_DEFAULT) {
+        uint32_t whole_start = 0;
+        uint32_t whole_end = strlen (str);
+        uint32_t start, end;
+        for (i = 0; ; i++) {
+            IBusAttribute *attr = ibus_attr_list_get (attrs, i);
+            if (!attr)
+                break;
+            start = g_utf8_offset_to_pointer (str, attr->start_index) - str;
+            end = g_utf8_offset_to_pointer (str, attr->end_index) - str;
+            if (start == 0 && strlen (str) == end)
+                continue;
+            if (start == 0) {
+                whole_start = end;
+            } else if (strlen (str) == end) {
+                whole_end = start;
+            } else {
+                whole_end = start;
+                if (whole_start < whole_end) {
+                    zwp_input_method_context_v1_preedit_styling (
+                            priv->context,
+                            whole_start,
+                            whole_end - whole_start,
+                            whole_wstyle);
+                }
+                whole_start = end;
+                whole_end = strlen (str);
+            }
+        }
+        if (whole_start < whole_end) {
+            zwp_input_method_context_v1_preedit_styling (
+                priv->context,
+                whole_start,
+                whole_end - whole_start,
+                whole_wstyle);
+        }
+    }
+}
+
+
+static void
+_context_show_preedit_text_cb (IBusInputContext *context,
+                               IBusWaylandIM    *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    uint32_t cursor;
+    const char *commit = "";
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    /* CURSOR is byte offset.  */
+    cursor =
+        g_utf8_offset_to_pointer (priv->preedit_text->text,
+                                  priv->preedit_cursor_pos) -
+        priv->preedit_text->text;
+
+    if (priv->preedit_mode == IBUS_ENGINE_PREEDIT_COMMIT)
+        commit = priv->preedit_text->text;
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_preedit_cursor (priv->context,
+                                                    cursor);
+        ibus_wayland_im_update_preedit_style (wlim);
+        zwp_input_method_context_v1_preedit_string (priv->context,
+                                                    priv->im_serial,
+                                                    priv->preedit_text->text,
+                                                    commit);
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat)
+            break;
+        zwp_input_method_v2_set_preedit_string  (
+                priv->seat->input_method_v2,
+                priv->preedit_text->text,
+                cursor,
+                cursor);
+        zwp_input_method_v2_commit (priv->seat->input_method_v2,
+                                    priv->im_serial);
+        priv->hiding_preedit_text = FALSE;
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static void
+_context_hide_preedit_text_cb (IBusInputContext *context,
+                               IBusWaylandIM    *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_preedit_string (priv->context,
+                                                    priv->im_serial,
+                                                    "",
+                                                    "");
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat)
+            break;
+        zwp_input_method_v2_set_preedit_string  (priv->seat->input_method_v2,
+                                                 "", 0, 0);
+        zwp_input_method_v2_commit (priv->seat->input_method_v2,
+                                    priv->im_serial);
+        priv->hiding_preedit_text = TRUE;
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static void
+_context_update_preedit_text_cb (IBusInputContext *context,
+                                 IBusText         *text,
+                                 gint              cursor_pos,
+                                 gboolean          visible,
+                                 guint             mode,
+                                 IBusWaylandIM    *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->preedit_text)
+        g_object_unref (priv->preedit_text);
+    priv->preedit_text = g_object_ref_sink (text);
+    priv->preedit_cursor_pos = cursor_pos;
+    priv->preedit_mode = mode;
+
+    if (visible)
+        _context_show_preedit_text_cb (context, wlim);
+    else
+        _context_hide_preedit_text_cb (context, wlim);
+}
+
+
+#if ENABLE_SURROUNDING
+static void
+_context_delete_surrounding_text_cb (IBusInputContext *context,
+                                     gint              offset,
+                                     guint             nchars,
+                                     IBusWaylandIM    *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    const char *start, *end;
+    const char *before, *after;
+    const char *cursor;
+    uint32_t before_length;
+    uint32_t after_length;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    if (!priv->surrounding_text)
+        return;
+
+    offset = MIN (offset, 0);
+
+    start = priv->surrounding_text->text;
+    end = start + strlen (priv->surrounding_text->text);
+    cursor = start + priv->surrounding_cursor_pos;
+
+    before = g_utf8_offset_to_pointer (cursor, offset);
+    g_return_if_fail (before >= start);
+    after = g_utf8_offset_to_pointer (cursor, offset + nchars);
+    g_return_if_fail (after <= end);
+
+    before_length = cursor - before;
+    after_length = after - cursor;
+
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_delete_surrounding_text (
+                priv->context,
+                -before_length,
+                before_length + after_length);
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat)
+            break;
+        zwp_input_method_v2_delete_surrounding_text (
+                priv->seat->input_method_v2,
+                before_length,
+                after_length);
+        zwp_input_method_v2_commit (priv->seat->input_method_v2,
+                                    priv->im_serial);
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+#endif
+
+
+static void
+handle_surrounding_text (void                                  *data,
+                         struct zwp_input_method_context_union *context,
+                         const char                            *text,
+                         uint32_t                               cursor,
+                         uint32_t                               anchor)
+{
+#if ENABLE_SURROUNDING
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    size_t len;
+    IBusText *ibustext;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    g_return_if_fail (text);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    len = strlen (text);
+    if (G_UNLIKELY (len > G_MAXUINT32 || len < cursor || len < anchor)) {
+        /* Should not show the text as a security reason. */
+        g_warning ("Received a wrong surrounding text length %zu < cursor %u "
+                   "anchor %u",
+                   len, cursor, anchor);
+        return;
+    }
+    ibustext = ibus_text_new_from_string (text);
+
+    if (priv->surrounding_text)
+        g_object_unref (priv->surrounding_text);
+    priv->surrounding_text = g_object_ref_sink (ibustext);
+    priv->surrounding_cursor_pos = cursor;
+
+    if (priv->ibuscontext != NULL &&
+        ibus_input_context_needs_surrounding_text (priv->ibuscontext)) {
+        /* CURSOR_POS and ANCHOR_POS are character offset.  */
+        guint cursor_pos = g_utf8_pointer_to_offset (text, text + cursor);
+        guint anchor_pos = g_utf8_pointer_to_offset (text, text + anchor);
+
+        ibus_input_context_set_surrounding_text (priv->ibuscontext,
+                                                 ibustext,
+                                                 cursor_pos,
+                                                 anchor_pos);
+    }
+#endif
+}
+
+
+static void
+context_surrounding_text_v1 (void                               *data,
+                             struct zwp_input_method_context_v1 *context_v1,
+                             const char                         *text,
+                             uint32_t                            cursor,
+                             uint32_t                            anchor)
+{
+    struct zwp_input_method_context_union context;
+    context.u.context_v1 = context_v1;
+    handle_surrounding_text (data, &context, text, cursor, anchor);
+}
+
+
+static void
+context_reset_v1 (void                               *data,
+                  struct zwp_input_method_context_v1 *context_v1)
+{
+}
+
+
+static void
+context_content_type_v1 (void                               *data,
+                         struct zwp_input_method_context_v1 *context_v1,
+                         uint32_t                            hints,
+                         uint32_t                            purpose)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    IBusInputHints ibus_hints = IBUS_INPUT_HINT_NONE;
+    IBusInputPurpose ibus_purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    /* ZWP_TEXT_INPUT_V1_CONTENT_HINT_PASSWORD == HIDDEN_TEXT & SENSITIVE_DATA
+     * ZWP_TEXT_INPUT_V1_CONTENT_HINT_DEFAULT == AUTO_COMPLETION &
+     *                                           AUTO_CORRECTION &
+     *                                           AUTO_CAPITALIZATION
+     */
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_AUTO_COMPLETION)
+        ibus_hints |= IBUS_INPUT_HINT_WORD_COMPLETION;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_AUTO_CORRECTION)
+        ibus_hints |= IBUS_INPUT_HINT_SPELLCHECK;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_AUTO_CAPITALIZATION)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_SENTENCES;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_LOWERCASE)
+        ibus_hints |= IBUS_INPUT_HINT_LOWERCASE;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_UPPERCASE)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_CHARS;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_TITLECASE)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_WORDS;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_HIDDEN_TEXT)
+        ibus_hints |= IBUS_INPUT_HINT_HIDDEN_TEXT;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_SENSITIVE_DATA)
+        ibus_hints |= IBUS_INPUT_HINT_PRIVATE;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_LATIN)
+        ibus_hints |= IBUS_INPUT_HINT_LATIN;
+    if (hints & ZWP_TEXT_INPUT_V1_CONTENT_HINT_MULTILINE)
+        ibus_hints |= IBUS_INPUT_HINT_MULTILINE;
+
+    switch (purpose) {
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_NORMAL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_ALPHA:
+        ibus_purpose = IBUS_INPUT_PURPOSE_ALPHA;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_DIGITS:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DIGITS;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_NUMBER:
+        ibus_purpose = IBUS_INPUT_PURPOSE_NUMBER;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_PHONE:
+        ibus_purpose = IBUS_INPUT_PURPOSE_PHONE;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_URL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_URL;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_EMAIL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_EMAIL;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_NAME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_NAME;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_PASSWORD:
+        ibus_purpose = IBUS_INPUT_PURPOSE_PASSWORD;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_DATE:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DATE;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_TIME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_TIME;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_DATETIME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DATETIME;
+        break;
+    case ZWP_TEXT_INPUT_V1_CONTENT_PURPOSE_TERMINAL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_TERMINAL;
+        break;
+    default:
+        g_warning ("Wrong purpose in the input-method context: %d", purpose);
+    }
+
+    priv->ibus_hints = ibus_hints;
+    priv->ibus_purpose = ibus_purpose;
+
+    /* Update priv->ibus_[hints|purpose] after _create_input_context_done()
+     * is called.
+     */
+    if (G_UNLIKELY (priv->ibuscontext)) {
+        ibus_input_context_set_content_type (priv->ibuscontext,
+                                             ibus_purpose,
+                                             ibus_hints);
+    }
+}
+
+
+static void
+context_invoke_action_v1 (void                               *data,
+                          struct zwp_input_method_context_v1 *context_v1,
+                          uint32_t                            button,
+                          uint32_t                            index)
+{
+}
+
+
+static void
+context_commit_state_v1 (void                               *data,
+                         struct zwp_input_method_context_v1 *context_v1,
+                         uint32_t                            serial)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->im_serial = serial;
+}
+
+
+static void
+context_preferred_language_v1 (void                               *data,
+                               struct zwp_input_method_context_v1 *context_v1,
+                               const char                         *language)
+{
+}
+
+
+static const struct zwp_input_method_context_v1_listener context_listener_v1 = {
+    .surrounding_text = context_surrounding_text_v1,
+    .reset = context_reset_v1,
+    .content_type = context_content_type_v1,
+    .invoke_action= context_invoke_action_v1,
+    .commit_state = context_commit_state_v1,
+    .preferred_language = context_preferred_language_v1
+};
+
+
+static struct xkb_keymap *
+create_user_xkb_keymap (struct xkb_context *xkb_context,
+                        IBusEngineDesc     *desc)
+{
+    struct xkb_rule_names names;
+    const gchar *layout;
+
+    g_assert (xkb_context);
+    g_assert (desc);
+    names.rules = "evdev";
+    names.model = "pc105";
+    layout = ibus_engine_desc_get_layout (desc);
+    if (!layout || *layout == '\0' || !g_strcmp0 (layout, "default"))
+        return NULL;
+    names.layout = layout;
+    names.variant = ibus_engine_desc_get_layout_variant (desc);
+    names.options = g_getenv ("XKB_DEFAULT_OPTIONS");
+    return xkb_keymap_new_from_names (xkb_context, &names, 0);
+}
+
+
+static struct xkb_keymap *
+create_system_xkb_keymap (struct xkb_context *xkb_context,
+                          uint32_t            format,
+                          int32_t             fd,
+                          uint32_t            size)
+{
+    GMappedFile *map;
+    GError *error = NULL;
+    struct xkb_keymap *xkb_keymap;
+
+    g_assert (xkb_context);
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+        close(fd);
+        return NULL;
+    }
+
+    map = g_mapped_file_new_from_fd (fd, FALSE, &error);
+    if (map == NULL) {
+        if (error) {
+            g_warning ("Failed to map file fd %s", error->message);
+            g_error_free (error);
+        }
+        close (fd);
+        return NULL;
+    }
+
+    xkb_keymap = xkb_map_new_from_string (xkb_context,
+                                          g_mapped_file_get_contents (map),
+                                          XKB_KEYMAP_FORMAT_TEXT_V1,
+                                          0);
+    g_mapped_file_unref (map);
+    close(fd);
+    return xkb_keymap;
+}
+
+
+static gboolean
+ibus_xkb_keymap_update_with_keymap (IBusXkbKeymap     *ibus_keymap,
+                                    struct xkb_keymap *keymap)
+{
+    struct xkb_state *state;
+
+    g_return_val_if_fail (ibus_keymap, FALSE);
+    g_return_val_if_fail (keymap, FALSE);
+    g_return_val_if_fail ((state = xkb_state_new (keymap)), FALSE);
+
+    if (ibus_keymap->state)
+        xkb_state_unref (ibus_keymap->state);
+    if (ibus_keymap->keymap)
+        xkb_keymap_unref (ibus_keymap->keymap);
+    clear_keycode2sym (&ibus_keymap->keycode2sym);
+    ibus_keymap->keymap = xkb_keymap_ref (keymap);
+    ibus_keymap->state = state;
+
+    /* xkb_map_mod_get_index() can return any xkb_mod_index_t value, including
+     * values wider than xkb_mod_mask_t can represent.  Shifting by those values
+     * is undefined behavior in C.
+     */
+#define _WL_MOD_MASK(keymap, name) \
+    ({ xkb_mod_index_t idx = xkb_map_mod_get_index (keymap, name); \
+       (idx < sizeof (xkb_mod_mask_t) * CHAR_BIT) \
+               ? ((xkb_mod_mask_t) 1 << idx) : 0; })
+    ibus_keymap->shift_mask   = _WL_MOD_MASK (keymap, "Shift");
+    ibus_keymap->lock_mask    = _WL_MOD_MASK (keymap, "Lock");
+    ibus_keymap->control_mask = _WL_MOD_MASK (keymap, "Control");
+    ibus_keymap->mod1_mask    = _WL_MOD_MASK (keymap, "Mod1");
+    ibus_keymap->mod2_mask    = _WL_MOD_MASK (keymap, "Mod2");
+    ibus_keymap->mod3_mask    = _WL_MOD_MASK (keymap, "Mod3");
+    ibus_keymap->mod4_mask    = _WL_MOD_MASK (keymap, "Mod4");
+    ibus_keymap->mod5_mask    = _WL_MOD_MASK (keymap, "Mod5");
+    ibus_keymap->super_mask   = _WL_MOD_MASK (keymap, "Super");
+    ibus_keymap->hyper_mask   = _WL_MOD_MASK (keymap, "Hyper");
+    ibus_keymap->meta_mask    = _WL_MOD_MASK (keymap, "Meta");
+#undef _WL_MOD_MASK
+
+    return TRUE;
+}
+
+
+static void
+_bus_global_engine_changed_cb (IBusBus       *bus,
+                               gchar         *engine_name,
+                               IBusWaylandIM *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    IBusEngineDesc *desc;
+    struct xkb_keymap *keymap;
+    gboolean has_keymap = FALSE;
+
+    g_return_if_fail (IBUS_IS_BUS (bus));
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    desc = ibus_bus_get_global_engine (bus);
+    ibus_wayland_im_reset_modifiers (wlim);
+    g_assert (desc);
+    g_assert (!g_strcmp0 (ibus_engine_desc_get_name (desc), engine_name));
+    /* Always update priv->key_user even if priv->use_sys_keymap is %FALSE
+     * so that ibus_wayland_im_set_property() switches %PROP_USE_SYS_KEYMAP
+     * immediately without checking the Gsettings.
+     */
+    keymap = create_user_xkb_keymap (priv->xkb_context, desc);
+    if (keymap) {
+        has_keymap = ibus_xkb_keymap_update_with_keymap (&priv->key_user,
+                                                         keymap);
+        xkb_keymap_unref (keymap);
+    }
+    if (priv->verbose) {
+        fprintf (priv->log, "New engine:%s keymap:%s state:%s\n",
+                 ibus_engine_desc_get_name (desc),
+                 has_keymap ? "TRUE" : "FALSE",
+                 priv->key_user.state ? "TRUE" : "FALSE");
+        fflush (priv->log);
+    }
+    g_object_unref (desc);
+}
+
+
+static void
+input_method_keyboard_keymap (void                      *data,
+                              struct zwp_keyboard_union *keyboard,
+                              uint32_t                   format,
+                              int32_t                    fd,
+                              uint32_t                   size)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    struct xkb_keymap *keymap;
+    gboolean has_keymap = FALSE;
+
+    if (!IBUS_IS_WAYLAND_IM (wlim)) {
+        close (fd);
+        g_return_if_reached ();
+    }
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    /* wlroots/types/wlr_virtual_keyboard_v1.c:virtual_keyboard_keymap()
+     * calls wl_client_post_no_memory(client) in case mmap() is failed with
+     * `size` = 0.
+     */
+    if (priv->version != INPUT_METHOD_V1 && size != 0) {
+        zwp_virtual_keyboard_v1_keymap (priv->seat->virtual_keyboard,
+                                        format, fd, size);
+        /* wlroots/types/wlr_virtual_keyboard_v1.c:virtual_keyboard_keymap()
+         * sets %TRUE to `has_compositor_keymap`.
+         */
+        priv->seat->has_compositor_keymap = TRUE;
+        /* Resynchronize modifier state on the new virtual keyboard.
+         * Modifier events that arrived before the keymap were dropped
+         * (the virtual keyboard rejects them without a keymap), so the
+         * virtual keyboard's modifier state may be stale.
+         *
+         * There is only a single value for the XKB group, contrary to
+         * modifiers (depressed, latched, locked) in Wayland.
+         * input_method_keyboard_modifiers() sends the `group` to
+         * xkb_state_update_mask() which updates `XKB_STATE_LAYOUT_LOCKED`
+         * and also adjust `XKB_STATE_LAYOUT_EFFECTIVE` with
+         * `XKB_STATE_LAYOUT_DEPRESSED`, `XKB_STATE_LAYOUT_LATCHED` and
+         * `XKB_STATE_LAYOUT_LOCKED` in the internal xkb_state_update_derived().
+         */
+        if (priv->key_sys.state) {
+            zwp_virtual_keyboard_v1_modifiers (
+                    priv->seat->virtual_keyboard,
+                    xkb_state_serialize_mods (priv->key_sys.state,
+                                              XKB_STATE_MODS_DEPRESSED),
+                    xkb_state_serialize_mods (priv->key_sys.state,
+                                              XKB_STATE_MODS_LATCHED),
+                    xkb_state_serialize_mods (priv->key_sys.state,
+                                              XKB_STATE_MODS_LOCKED),
+                    xkb_state_serialize_layout (priv->key_sys.state,
+                                                XKB_STATE_LAYOUT_EFFECTIVE));
+        }
+    }
+    if (priv->key_user.keymap && priv->key_user.state && priv->key_sys.state) {
+        close (fd);
+        return;
+    }
+    keymap = create_system_xkb_keymap (priv->xkb_context, format, fd, size);
+    if (keymap) {
+        has_keymap = ibus_xkb_keymap_update_with_keymap (&priv->key_sys,
+                                                         keymap);
+        if (!has_keymap)
+            g_clear_pointer (&keymap, xkb_keymap_unref);
+    }
+    if (has_keymap && !priv->key_user.state) {
+        has_keymap = ibus_xkb_keymap_update_with_keymap (&priv->key_user,
+                                                         keymap);
+        if (!has_keymap)
+            g_clear_pointer (&keymap, xkb_keymap_unref);
+    }
+    if (has_keymap)
+        xkb_keymap_unref (keymap);
+    if (priv->verbose) {
+        fprintf (priv->log, "System keymap format:%u fd:%d size:%u "
+                            "keymap:%s state:%s\n",
+                 format, fd, size,
+                 has_keymap ? "TRUE" : "FALSE",
+                 priv->key_sys.state ? "TRUE" : "FALSE");
+        fflush (priv->log);
+    }
+}
+
+
+static void
+ibus_wayland_seat_destroy (gpointer data)
+{
+    IBusWaylandSeat *seat = (IBusWaylandSeat *)data;
+    g_return_if_fail (seat);
+    g_clear_pointer (&seat->name, g_free);
+    g_clear_pointer (&seat->input_popup_surface,
+                     zwp_input_popup_surface_v2_destroy);
+    g_clear_pointer (&seat->virtual_keyboard, zwp_virtual_keyboard_v1_destroy);
+    g_clear_pointer (&seat->keyboard_v2,
+                     zwp_input_method_keyboard_grab_v2_destroy);
+    g_clear_pointer (&seat->input_method_v2, zwp_input_method_v2_destroy);
+    g_slice_free (IBusWaylandSeat, seat);
+}
+
+
+static IBusWaylandSeat *
+_get_seat_with_name (GPtrArray *seats,
+                     uint32_t   wl_name,
+                     guint     *index)
+{
+    guint i;
+    g_return_val_if_fail (seats, NULL);
+    for (i = 0; i < seats->len; ++i) {
+        IBusWaylandSeat *seat = g_ptr_array_index (seats, i);
+        if (seat->wl_name == wl_name) {
+            if (index)
+                *index = i;
+            return seat;
+        }
+    }
+    return NULL;
+}
+
+
+static gboolean
+ibus_wayland_im_post_key (IBusWaylandIM *wlim,
+                          uint32_t       key,
+                          uint32_t       modifiers,
+                          uint32_t       state,
+                          xkb_keysym_t   sym,
+                          gboolean       filtered)
+{
+    IBusWaylandIMPrivate *priv;
+    IBusXkbKeymap *active_key;
+    xkb_mod_mask_t mods_depressed, new_mods_depressed;
+    gboolean clear_virtual_state = FALSE;
+    gboolean is_invalid_key = FALSE;
+
+    g_return_val_if_fail (IBUS_IS_WAYLAND_IM (wlim), FALSE);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    /* ibus_wayland_im_commit_text() does not work without the activation. */
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        if (!priv->context)
+            return FALSE;
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat || !priv->seat->active)
+            return FALSE;
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+    if (priv->use_sys_keymap)
+        active_key = &priv->key_sys;
+    else
+        active_key = &priv->key_user;
+    if (!active_key->state)
+        return FALSE;
+    mods_depressed = xkb_state_serialize_mods (active_key->state,
+                                               XKB_STATE_DEPRESSED |
+                                               XKB_STATE_LATCHED);
+    new_mods_depressed = mods_depressed;
+    filtered = ibus_wayland_im_update_virtual_depressed (wlim,
+                                                         key,
+                                                         modifiers,
+                                                         state,
+                                                         sym,
+                                                         active_key,
+                                                         filtered,
+                                                         &new_mods_depressed,
+                                                         &clear_virtual_state,
+                                                         &is_invalid_key);
+    filtered = ibus_wayland_im_commit_key_event (wlim,
+                                                 key,
+                                                 modifiers,
+                                                 state,
+                                                 sym,
+                                                 active_key,
+                                                 filtered,
+                                                 &new_mods_depressed,
+                                                 &clear_virtual_state,
+                                                 &is_invalid_key);
+    ibus_wayland_im_update_virtual_xkb_state (wlim,
+                                              key,
+                                              state,
+                                              active_key,
+                                              mods_depressed,
+                                              new_mods_depressed,
+                                              clear_virtual_state,
+                                              is_invalid_key);
+    return filtered;
+}
+
+
+static void
+_process_key_event_done (GObject      *object,
+                         GAsyncResult *res,
+                         gpointer      user_data)
+{
+    IBusInputContext *context = (IBusInputContext *)object;
+    IBusWaylandKeyEvent *event = (IBusWaylandKeyEvent *)user_data;
+    GError *error = NULL;
+    gboolean retval = ibus_input_context_process_key_event_async_finish (
+            context,
+            res,
+            &error);
+    IBusWaylandIMPrivate *priv = NULL;
+
+    if (error != NULL) {
+        if (event && event->wlim && IBUS_IS_WAYLAND_IM (event->wlim)) {
+            priv = ibus_wayland_im_get_instance_private (event->wlim);
+        }
+        if (priv && priv->log) {
+            fprintf (priv->log, "Process Key Event failed: %s\n",
+                     error->message);
+            fflush (priv->log);
+        } else {
+            g_warning ("Process Key Event failed: %s", error->message);
+        }
+        g_error_free (error);
+    }
+    g_return_if_fail (event);
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (event->wlim));
+
+    priv = ibus_wayland_im_get_instance_private (event->wlim);
+    /* Should ignore key events after input_method_deactivate() is called
+     * even if context->ref_count is not 0 yet but priv->ibuscontext is null
+     * because of the async time lag.
+     */
+    if (priv->ibuscontext) {
+        retval = ibus_wayland_im_post_key (event->wlim,
+                                           event->key,
+                                           event->modifiers,
+                                           event->state,
+                                           event->sym,
+                                           retval);
+    }
+    /* Check retral from ibus_wayland_im_post_key() */
+    if (priv->ibuscontext && !retval) {
+        ibus_wayland_im_keycode (event->wlim,
+                                 event->key_serial,
+                                 event->time,
+                                 event->key,
+                                 event->state);
+    }
+
+    g_slice_free (IBusWaylandKeyEvent, event);
+}
+
+
+static void
+_process_key_event_reply_done (GObject      *object,
+                               GAsyncResult *res,
+                               gpointer      user_data)
+{
+    IBusInputContext *context = (IBusInputContext *)object;
+    IBusWaylandKeyEvent *event = (IBusWaylandKeyEvent *)user_data;
+    GError *error = NULL;
+    gboolean retval = ibus_input_context_process_key_event_async_finish (
+            context,
+            res,
+            &error);
+    if (error != NULL) {
+        IBusWaylandIMPrivate *priv = NULL;
+        if (event && event->wlim && IBUS_IS_WAYLAND_IM (event->wlim)) {
+            priv = ibus_wayland_im_get_instance_private (event->wlim);
+        }
+        if (priv && priv->log) {
+            fprintf (priv->log, "Process Key Event failed: %s\n",
+                     error->message);
+            fflush (priv->log);
+        } else {
+            g_warning ("Process Key Event failed: %s", error->message);
+        }
+        g_error_free (error);
+    }
+    g_return_if_fail (event);
+    event->retval = retval;
+    event->count = 0;
+    g_source_remove (event->count_cb_id);
+}
+
+
+static gboolean
+_process_key_event_count_cb (gpointer user_data)
+{
+    IBusWaylandKeyEvent *event = (IBusWaylandKeyEvent *)user_data;
+    g_return_val_if_fail (event, G_SOURCE_REMOVE);
+    if (!event->count)
+        return G_SOURCE_REMOVE;
+    /* Wait for about 10 secs. */
+    if (event->count++ == 10000) {
+        event->count = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+
+static void
+_process_key_event_sync (IBusWaylandIM       *wlim,
+                         IBusWaylandKeyEvent *event)
+{
+    IBusWaylandIMPrivate *priv;
+    gboolean retval;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    g_assert (event);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (!priv->ibuscontext)
+        return;
+    retval = ibus_input_context_process_key_event (priv->ibuscontext,
+                                                   event->sym,
+                                                   event->key,
+                                                   event->modifiers);
+    ibus_input_context_post_process_key_event (priv->ibuscontext);
+    retval = ibus_wayland_im_post_key (wlim,
+                                       event->key,
+                                       event->modifiers,
+                                       event->state,
+                                       event->sym,
+                                       retval);
+    if (!retval) {
+        ibus_wayland_im_keycode (wlim,
+                                 event->key_serial,
+                                 event->time,
+                                 event->key,
+                                 event->state);
+    }
+}
+
+
+static void
+_process_key_event_async (IBusWaylandIM       *wlim,
+                          IBusWaylandKeyEvent *event)
+{
+    IBusWaylandIMPrivate *priv;
+    IBusWaylandKeyEvent *async_event;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    g_assert (event);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    async_event = g_slice_new0 (IBusWaylandKeyEvent);
+    if (!async_event) {
+        if (priv->log) {
+            fprintf (priv->log, "Cannot allocate async data\n");
+            fflush (priv->log);
+        } else {
+            g_warning ("Cannot allocate async data");
+        }
+        _process_key_event_sync (wlim, event);
+        return;
+    }
+    async_event->context = priv->context;
+    async_event->key_serial = event->key_serial;
+    async_event->time = event->time;
+    async_event->key = event->key;
+    async_event->sym = event->sym;
+    async_event->modifiers = event->modifiers & ~IBUS_RELEASE_MASK;
+    async_event->state = event->state;
+    async_event->wlim = wlim;
+    ibus_input_context_process_key_event_async (priv->ibuscontext,
+                                                event->sym,
+                                                event->key,
+                                                event->modifiers,
+                                                -1,
+                                                NULL,
+                                                _process_key_event_done,
+                                                async_event);
+}
+
+
+static void
+_process_key_event_hybrid_async (IBusWaylandIM       *wlim,
+                                 IBusWaylandKeyEvent *event)
+{
+    IBusWaylandIMPrivate *priv;
+    GSource *source;
+    IBusWaylandKeyEvent *async_event = NULL;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    g_assert (event);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    source = g_timeout_source_new (1);
+    if (source)
+        async_event = g_slice_new0 (IBusWaylandKeyEvent);
+    if (!async_event) {
+        if (priv->log) {
+            fprintf (priv->log, "Cannot wait for the reply of the "
+                                "process key event.\n");
+            fflush (priv->log);
+        } else {
+            g_warning ("Cannot wait for the reply of the process key event.");
+        }
+        _process_key_event_sync (wlim, event);
+        if (source)
+            g_source_destroy (source);
+        return;
+    }
+    async_event->count = 1;
+    async_event->wlim = wlim;
+    g_source_attach (source, NULL);
+    g_source_unref (source);
+    async_event->count_cb_id = g_source_get_id (source);
+    ibus_input_context_process_key_event_async (priv->ibuscontext,
+                                                event->sym,
+                                                event->key,
+                                                event->modifiers,
+                                                -1,
+                                                NULL,
+                                                _process_key_event_reply_done,
+                                                async_event);
+    g_source_set_callback (source, _process_key_event_count_cb,
+                           async_event, NULL);
+    while (async_event->count)
+        g_main_context_iteration (NULL, TRUE);
+    /* #2498 Checking source->ref_count might cause Nautilus hang up
+     */
+    if (priv->ibuscontext) {
+        async_event->retval = ibus_wayland_im_post_key (wlim,
+                                                        event->key,
+                                                        event->modifiers,
+                                                        event->state,
+                                                        event->sym,
+                                                        async_event->retval);
+    }
+    if (priv->ibuscontext && !async_event->retval) {
+        ibus_wayland_im_keycode (wlim,
+                                 event->key_serial,
+                                 event->time,
+                                 event->key,
+                                 event->state);
+    }
+    g_slice_free (IBusWaylandKeyEvent, async_event);
+}
+
+
+static gboolean
+_process_key_event_repeat_rate_cb (gpointer user_data)
+{
+    IBusWaylandKeyEvent *event = (IBusWaylandKeyEvent *)user_data;
+    IBusWaylandIM *wlim;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_val_if_fail (event, G_SOURCE_REMOVE);
+
+    wlim = event->wlim;
+    if (!IBUS_IS_WAYLAND_IM (wlim)) {
+        g_warning ("Failed BUS_IS_WAYLAND_IM (wlim)");
+        event->repeat_rate_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    if (!priv->ibuscontext) {
+        event->repeat_rate_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    if (g_strcmp0 (event->ibus_object_path,
+                   g_dbus_proxy_get_object_path (
+                           G_DBUS_PROXY (priv->ibuscontext)))) {
+        event->repeat_rate_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    switch (_use_sync_mode) {
+    case 1:
+        _process_key_event_sync (wlim, event);
+        break;
+    case 2:
+        _process_key_event_hybrid_async (wlim, event);
+        break;
+    default:
+        _process_key_event_async (wlim, event);
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+
+static gboolean
+_process_key_event_repeat_delay_cb (gpointer user_data)
+{
+    IBusWaylandKeyEvent *event = (IBusWaylandKeyEvent *)user_data;
+    IBusWaylandIM *wlim;
+    IBusWaylandIMPrivate *priv;
+    GSource *source;
+
+    g_return_val_if_fail (event, G_SOURCE_REMOVE);
+
+    wlim = event->wlim;
+    if (!IBUS_IS_WAYLAND_IM (wlim)) {
+        g_warning ("Failed BUS_IS_WAYLAND_IM (wlim)");
+        event->count_cb_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    /* The key release event was sent to non-Wayland apps likes xterm. */
+    if (!priv->ibuscontext) {
+        event->count_cb_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    /* The focus is changed. */
+    if (g_strcmp0 (event->ibus_object_path,
+                   g_dbus_proxy_get_object_path (
+                           G_DBUS_PROXY (priv->ibuscontext)))) {
+        event->count_cb_id = 0;
+        g_clear_pointer (&event->ibus_object_path, g_free);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (event->count)
+        return G_SOURCE_CONTINUE;
+
+    event->count = 1;
+    switch (_use_sync_mode) {
+    case 1:
+        _process_key_event_sync (event->wlim, event);
+        break;
+    case 2:
+        _process_key_event_hybrid_async (event->wlim, event);
+        break;
+    default:
+        _process_key_event_async (event->wlim, event);
+    }
+    source = g_timeout_source_new (priv->repeat_rate);
+    g_source_attach (source, NULL);
+    g_source_unref (source);
+    event->repeat_rate_id = g_source_get_id (source);
+    g_source_set_callback (source, _process_key_event_repeat_rate_cb,
+                           event, NULL);
+    return G_SOURCE_CONTINUE;
+}
+
+
+static gboolean
+key_event_check_repeat (IBusWaylandIM       *wlim,
+                        IBusWaylandKeyEvent *event)
+{
+    IBusWaylandIMPrivate *priv;
+    int i;
+    const guint16 *repeat_ignore = IBUS_COMPOSE_IGNORE_KEYLIST;
+    int repeat_ignore_length = G_N_ELEMENTS (IBUS_COMPOSE_IGNORE_KEYLIST);
+    GSource *source;
+    static IBusWaylandKeyEvent repeating_event = { 0, };
+
+    g_return_val_if_fail (IBUS_IS_WAYLAND_IM (wlim), FALSE);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if G_UNLIKELY (!event->sym)
+        return FALSE;
+    /* FIXME: Should consider if xkb_keymap_key_repeats() is better. */
+    for (i = 0; i < repeat_ignore_length; i++) {
+        if (event->sym == (uint32_t)repeat_ignore[i])
+            return FALSE;
+    }
+
+    if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        if (repeating_event.repeat_rate_id) {
+            g_source_remove (repeating_event.repeat_rate_id);
+            repeating_event.repeat_rate_id = 0;
+        }
+        if (repeating_event.count_cb_id) {
+            /* Double KeyPress happen likes Ctrl-a-b */
+            g_source_remove (repeating_event.count_cb_id);
+            repeating_event.count_cb_id = 0;
+        }
+        g_clear_pointer (&repeating_event.ibus_object_path, g_free);
+        if (!priv->ibuscontext)
+            return FALSE;
+        if (IS_DEAD_KEY (event->sym)) {
+            /* With "fr(ergol)" keymap, in case that key <AD09> is typed
+             * twice, the second pressed keysym is "dead_diaeresis" and
+             * the second released keysym is "ISO_Level5_Latch".
+             * The keysym "dead_diaeresis" should not be auto-repeated
+             * in this case.
+             */
+            if (priv->released_dead_key_wo_press == event->sym) {
+                priv->released_dead_key_wo_press = 0;
+                return TRUE;
+            }
+            priv->pressed_dead_key = event->sym;
+        } else {
+            priv->released_dead_key_wo_press = 0;
+        }
+        source = g_timeout_source_new (priv->repeat_delay);
+        g_source_attach (source, NULL);
+        g_source_unref (source);
+        /* Copy the keycode and modifier since Ctrl key has a delay. */
+        memcpy (&repeating_event, event, sizeof (IBusWaylandKeyEvent));
+        repeating_event.count_cb_id = g_source_get_id (source);
+        repeating_event.count = 0;
+        repeating_event.ibus_object_path =
+                       g_strdup (g_dbus_proxy_get_object_path (
+                               G_DBUS_PROXY (priv->ibuscontext)));
+        g_source_set_callback (source, _process_key_event_repeat_delay_cb,
+                               &repeating_event, NULL);
+    } else {
+        if (event->sym != repeating_event.sym) {
+            if (IS_DEAD_KEY (event->sym)) {
+                if (event->sym == priv->pressed_dead_key) {
+                    priv->pressed_dead_key = 0;
+                } else if (!priv->pressed_dead_key) {
+                    /* With "fr(ergol)" keymap, in case that key <AD09> is
+                     * typed twice, the first pressed keysym is
+                     * "ISO_Level5_Latch" and the first released keysym is
+                     * "dead_diaeresis" with the MOD3(the level5) mask,
+                     * the second pressed keysym is "dead_diaeresis" and
+                     * the second released keysym is "ISO_Level5_Latch".
+                     * So the first released "dead_diaeresis" is invalid and
+                     * the second pressed "dead_diaeresis" should be released
+                     * immediately.
+                     */
+                    priv->released_dead_key_wo_press = event->sym;
+                }
+            }
+        } else if (IS_DEAD_KEY (repeating_event.sym)) {
+            if (repeating_event.sym == priv->pressed_dead_key)
+                priv->pressed_dead_key = 0;
+        } else {
+            priv->released_dead_key_wo_press = 0;
+        }
+        if (repeating_event.repeat_rate_id) {
+            g_source_remove (repeating_event.repeat_rate_id);
+            repeating_event.repeat_rate_id = 0;
+        }
+        if (repeating_event.count_cb_id) {
+            g_source_remove (repeating_event.count_cb_id);
+            repeating_event.count_cb_id = 0;
+        }
+        g_clear_pointer (&repeating_event.ibus_object_path, g_free);
+    }
+    return TRUE;
+}
+
+
+static void
+input_method_keyboard_key (void                      *data,
+                           struct zwp_keyboard_union *keyboard,
+                           uint32_t                   key_serial,
+                           uint32_t                   time,
+                           uint32_t                   key,
+                           uint32_t                   state)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    IBusWaylandKeyEvent event = { 0, };
+    uint32_t code;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (!priv->key_user.state && !priv->key_sys.state) {
+        ibus_wayland_im_keycode (wlim, key_serial, time, key, state);
+        return;
+    }
+
+    if (!priv->ibuscontext) {
+        gboolean retval = ibus_wayland_im_post_key (wlim,
+                                                    key,
+                                                    priv->modifiers,
+                                                    state,
+                                                    0,
+                                                    FALSE);
+        if (!retval)
+            ibus_wayland_im_keycode (wlim, key_serial, time, key, state);
+        return;
+    }
+
+    event.key_serial = key_serial;
+    event.time = time;
+    event.key = key;
+    event.state = state;
+    code = key + 8;
+    event.sym = 0;
+    /* xkb_key_get_syms() does not return the capital syms with Shift key. */
+    if (priv->key_sys.state)
+        event.sym = xkb_state_key_get_one_sym (priv->key_sys.state, code);
+    /* The position of Caps_Lock, Control, ISO_Next_Group, Multi_key keysyms
+     * can be customzied by each desktop configuration.
+     */
+    switch (event.sym) {
+    case IBUS_KEY_Caps_Lock:
+    case IBUS_KEY_Control_L:
+    case IBUS_KEY_Control_R:
+    case IBUS_KEY_ISO_Next_Group:
+    case IBUS_KEY_Multi_key:
+        break;
+    default:
+        if (priv->key_user.state)
+            event.sym = xkb_state_key_get_one_sym (priv->key_user.state, code);
+    }
+    event.modifiers = priv->modifiers;
+    if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
+        event.modifiers |= IBUS_RELEASE_MASK;
+    event.wlim = wlim;
+#ifdef IBUS_LOG_SHOW_KEYSYM
+    if (priv->verbose) {
+        fprintf (priv->log, "%s serial:%u time:%u key:%u "
+                            "sym:%x system_user:%x system_sym:%x "
+                            "modifiers:%x state:%s\n",
+                 G_STRFUNC,
+                 key_serial, time, key,
+                 event.sym,
+                 priv->key_user.state ?
+                     xkb_state_key_get_one_sym (priv->key_user.state, code) :
+                     0,
+                 priv->key_sys.state ?
+                     xkb_state_key_get_one_sym (priv->key_sys.state, code) :
+                     0,
+                 event.modifiers, state ? "press" : "release");
+        fflush (priv->log);
+    }
+#endif
+
+    key_event_check_repeat (wlim, &event);
+    switch (_use_sync_mode) {
+    case 1:
+        return _process_key_event_sync (wlim, &event);
+    case 2:
+        return _process_key_event_hybrid_async (wlim, &event);
+    default:
+        return _process_key_event_async (wlim, &event);
+    }
+}
+
+
+/**
+ * input_method_keyboard_modifiers:
+ *
+ * This is a common API of input_method_keyboard_modifiers_v1() and
+ * input_method_keyboard_modifiers_v2().
+ * If you configure multiple XKB layouts in the system with
+ * /etc/vconsole.conf file, you can switch the active layout with
+ * the XKB options and @group is changed with the shortcut key like
+ * "grp:lalt_lshift_toggle" but If you click the keyboard icon in
+ * Plasma KDE and change the active layout with GUI, @group is not
+ * changed and I assume it's a bug [1].
+ * Currently there are two cases of the combinations of the IBus keymap and
+ * the system keymap supported by IBus:
+ * 1. Always Same keymaps
+ *    E.g. IBus keymap is "lv(tilde)" and system one is "lv(tilde)"
+ * 2. System keymap is "US" and switch IBus keymaps with Super-space key
+ *    E.g. IBus keymap is "lv(tilde)" and system one is "us"
+ * So you should use both XKB option keys and IBus shortcutkeys to switch the
+ * keymaps to change both XKB keymaps and IBus keymaps but you should not
+ * click the keyboard icon in KDE.
+ *
+ * [1] https://bugs.kde.org/show_bug.cgi?id=518371
+ */
+static void
+input_method_keyboard_modifiers (void                      *data,
+                                 struct zwp_keyboard_union *keyboard,
+                                 uint32_t                   key_serial,
+                                 uint32_t                   mods_depressed,
+                                 uint32_t                   mods_latched,
+                                 uint32_t                   mods_locked,
+                                 uint32_t                   group)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    IBusXkbKeymap *active_key;
+    xkb_mod_mask_t mask = 0;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->use_sys_keymap)
+        active_key = &priv->key_sys;
+    else
+        active_key = &priv->key_user;
+    /* Do not reset Latch modifiers by system in case the system keymap
+     * has no the Latch key.
+     * In case the user keymap is "lv(tilde)" and the system one is "us",
+     * input_method_keyboard_modifiers() clears state of Level3_Latch key
+     * immediately after the Level3_Latch key is released because the "us"
+     * keymap does not have the latch keys.
+     * The behavior is different in case both user and system keymaps are
+     * "lv(tilde)".
+     * So `is_virtual_latch_state` keeps the virtual state of the latch keys
+     * not to override the state of the "us" keymap.
+     */
+    if (!priv->is_virtual_latch_state || key_serial == 0) {
+        if (priv->key_user.state) {
+            xkb_state_update_mask (priv->key_user.state, mods_depressed,
+                                   mods_latched, mods_locked, 0, 0, group);
+        }
+        /* Pressing XKB group key likes Alt_R with grp:toggle calls
+         * input_method_keyboard_modifiers() with the updated `group`
+         * and need to update priv->key_sys.state to switch the XKB group
+         * in the system keymap.
+         *
+         * XKB group key can switch `group` but clicking the keyboard icon
+         * of KDE does not change `group` at present. Maybe a bug in the
+         * KDE Wayland compositor.
+         */
+        if (priv->key_sys.state) {
+            xkb_state_update_mask (priv->key_sys.state, mods_depressed,
+                                   mods_latched, mods_locked, 0, 0, group);
+        }
+    }
+    if (active_key->state) {
+        /* CapsLock needs XKB_STATE_LOCKED */
+        mask = xkb_state_serialize_mods (active_key->state,
+                                         XKB_STATE_DEPRESSED |
+                                         XKB_STATE_LATCHED |
+                                         XKB_STATE_LOCKED);
+    }
+    if (priv->verbose) {
+        struct xkb_state *state = active_key->state;
+        fprintf (priv->log, "Update modifiers serial:%u depress:%X latch:%X "
+                             "lock:%X group:%X orig_depre:%X orig_latch:%X "
+                             "orig_lock:%X\n",
+                 key_serial, mods_depressed, mods_latched, mods_locked, group,
+                 state ?
+                     xkb_state_serialize_mods (state, XKB_STATE_DEPRESSED) :
+                     0xFFFFFFFF,
+                 state ?
+                     xkb_state_serialize_mods (state, XKB_STATE_LATCHED) :
+                     0xFFFFFFFF,
+                 state ?
+                     xkb_state_serialize_mods (state, XKB_STATE_LOCKED) :
+                     0xFFFFFFFF);
+        fflush (priv->log);
+    }
+
+    priv->modifiers = 0;
+    if (mask & active_key->shift_mask)
+        priv->modifiers |= IBUS_SHIFT_MASK;
+    if (mask & active_key->lock_mask)
+        priv->modifiers |= IBUS_LOCK_MASK;
+    if (mask & active_key->control_mask)
+        priv->modifiers |= IBUS_CONTROL_MASK;
+    if (mask & active_key->mod1_mask)
+        priv->modifiers |= IBUS_MOD1_MASK;
+    if (mask & active_key->mod2_mask)
+        priv->modifiers |= IBUS_MOD2_MASK;
+    if (mask & active_key->mod3_mask)
+        priv->modifiers |= IBUS_MOD3_MASK;
+    if (mask & active_key->mod4_mask)
+        priv->modifiers |= IBUS_MOD4_MASK;
+    if (mask & active_key->mod5_mask)
+        priv->modifiers |= IBUS_MOD5_MASK;
+    if (mask & active_key->super_mask)
+        priv->modifiers |= IBUS_SUPER_MASK;
+    if (mask & active_key->hyper_mask)
+        priv->modifiers |= IBUS_HYPER_MASK;
+    if (mask & active_key->meta_mask)
+        priv->modifiers |= IBUS_META_MASK;
+
+    if (!key_serial)
+        return;
+
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_modifiers (priv->context, key_serial,
+                                               mods_depressed, mods_latched,
+                                               mods_locked, group);
+        break;
+    case INPUT_METHOD_V2:
+        /* wlroots/types/wlr_virtual_keyboard_v1.c:virtual_keyboard_modifiers()
+         * returns "Cannot send a modifier state before defining a keymap"
+         * if `has_compositor_keymap` is %FALSE.
+         */
+        if (!priv->seat)
+            break;
+        if (priv->seat->has_compositor_keymap) {
+            zwp_virtual_keyboard_v1_modifiers (priv->seat->virtual_keyboard,
+                                               mods_depressed, mods_latched,
+                                               mods_locked, group);
+        }
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static void
+input_method_keyboard_repeat_info (void                      *data,
+                                   struct zwp_keyboard_union *keyboard,
+                                   int32_t                    rate,
+                                   int32_t                    delay)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->repeat_rate = rate;
+    priv->repeat_delay = delay;
+    if (priv->verbose) {
+        fprintf (priv->log, "keyboard repeat info rate %d delay %d\n",
+                rate, delay);
+        fflush (priv->log);
+    }
+}
+
+
+static void
+input_method_keyboard_keymap_v1 (void               *data,
+                                 struct wl_keyboard *keyboard_v1,
+                                 uint32_t            format,
+                                 int32_t             fd,
+                                 uint32_t            size)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v1 = keyboard_v1;
+    input_method_keyboard_keymap (data, &keyboard, format, fd, size);
+}
+
+
+static void
+input_method_keyboard_key_v1 (void               *data,
+                              struct wl_keyboard *keyboard_v1,
+                              uint32_t            key_serial,
+                              uint32_t            time,
+                              uint32_t            key,
+                              uint32_t            state)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v1 = keyboard_v1;
+    input_method_keyboard_key (data, &keyboard, key_serial, time, key, state);
+}
+
+
+static void
+input_method_keyboard_modifiers_v1 (void               *data,
+                                    struct wl_keyboard *keyboard_v1,
+                                    uint32_t            key_serial,
+                                    uint32_t            mods_depressed,
+                                    uint32_t            mods_latched,
+                                    uint32_t            mods_locked,
+                                    uint32_t            group)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v1 = keyboard_v1;
+    input_method_keyboard_modifiers (data,
+                                     &keyboard,
+                                     key_serial,
+                                     mods_depressed,
+                                     mods_latched,
+                                     mods_locked,
+                                     group);
+}
+
+
+static void
+input_method_keyboard_repeat_info_v1 (void               *data,
+                                      struct wl_keyboard *keyboard_v1,
+                                      int32_t             rate,
+                                      int32_t             delay)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v1 = keyboard_v1;
+    input_method_keyboard_repeat_info (data, &keyboard, rate, delay);
+}
+
+
+static void
+input_method_keyboard_keymap_v2 (void    *data,
+                                 struct zwp_input_method_keyboard_grab_v2
+                                         *keyboard_v2,
+                                 uint32_t format,
+                                 int32_t  fd,
+                                 uint32_t size)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v2 = keyboard_v2;
+    input_method_keyboard_keymap (data, &keyboard, format, fd, size);
+}
+
+
+static void
+input_method_keyboard_key_v2 (void    *data,
+                              struct zwp_input_method_keyboard_grab_v2
+                                      *keyboard_v2,
+                              uint32_t key_serial,
+                              uint32_t time,
+                              uint32_t key,
+                              uint32_t state)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v2 = keyboard_v2;
+    input_method_keyboard_key (data, &keyboard, key_serial, time, key, state);
+}
+
+
+static void
+input_method_keyboard_modifiers_v2 (void    *data,
+                                    struct zwp_input_method_keyboard_grab_v2
+                                            *keyboard_v2,
+                                    uint32_t key_serial,
+                                    uint32_t mods_depressed,
+                                    uint32_t mods_latched,
+                                    uint32_t mods_locked,
+                                    uint32_t group)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v2 = keyboard_v2;
+    input_method_keyboard_modifiers (data,
+                                     &keyboard,
+                                     key_serial,
+                                     mods_depressed,
+                                     mods_latched,
+                                     mods_locked,
+                                     group);
+}
+
+
+static void
+input_method_keyboard_repeat_info_v2 (void   *data,
+                                      struct zwp_input_method_keyboard_grab_v2
+                                             *keyboard_v2,
+                                      int32_t rate,
+                                      int32_t delay)
+{
+    struct zwp_keyboard_union keyboard;
+    keyboard.u.keyboard_v2 = keyboard_v2;
+    input_method_keyboard_repeat_info (data, &keyboard, rate, delay);
+}
+
+
+static const struct wl_keyboard_listener keyboard_listener_v1 = {
+    .keymap = input_method_keyboard_keymap_v1,
+    .enter = NULL, /* enter */
+    .leave = NULL, /* leave */
+    .key = input_method_keyboard_key_v1,
+    .modifiers = input_method_keyboard_modifiers_v1,
+#ifdef WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION
+    .repeat_info = input_method_keyboard_repeat_info_v1
+#endif
+};
+
+
+static const struct zwp_input_method_keyboard_grab_v2_listener
+        keyboard_listener_v2 = {
+    .keymap = input_method_keyboard_keymap_v2,
+    .key = input_method_keyboard_key_v2,
+    .modifiers = input_method_keyboard_modifiers_v2,
+    .repeat_info = input_method_keyboard_repeat_info_v2,
+};
+
+
+static void
+_create_input_context_done (GObject      *object,
+                            GAsyncResult *res,
+                            gpointer      user_data)
+{
+    IBusWaylandIM *wlim = (IBusWaylandIM *) user_data;
+    IBusWaylandIMPrivate *priv;
+    GError *error = NULL;
+    IBusInputContext *context;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    context = ibus_bus_create_input_context_async_finish (
+            priv->ibusbus, res, &error);
+    if (priv->cancellable != NULL)
+        g_clear_object (&priv->cancellable);
+
+    if (context == NULL) {
+        g_warning ("Create input context failed: %s.", error->message);
+        g_error_free (error);
+    }
+    else {
+        guint32 capabilities = IBUS_CAP_FOCUS | IBUS_CAP_PREEDIT_TEXT;
+        priv->ibuscontext = context;
+
+        g_signal_connect (priv->ibuscontext, "commit-text",
+                          G_CALLBACK (_context_commit_text_cb),
+                          wlim);
+        g_signal_connect (priv->ibuscontext, "forward-key-event",
+                          G_CALLBACK (_context_forward_key_event_cb),
+                          wlim);
+
+        g_signal_connect (priv->ibuscontext, "update-preedit-text-with-mode",
+                          G_CALLBACK (_context_update_preedit_text_cb),
+                          wlim);
+        g_signal_connect (priv->ibuscontext, "show-preedit-text",
+                          G_CALLBACK (_context_show_preedit_text_cb),
+                          wlim);
+        g_signal_connect (priv->ibuscontext, "hide-preedit-text",
+                          G_CALLBACK (_context_hide_preedit_text_cb),
+                          wlim);
+
+#ifdef ENABLE_SURROUNDING
+        g_signal_connect (priv->ibuscontext, "delete-surrounding-text",
+                          G_CALLBACK (_context_delete_surrounding_text_cb),
+                          wlim);
+
+        capabilities |= IBUS_CAP_SURROUNDING_TEXT;
+#endif
+        if (_use_sync_mode == 1)
+            capabilities |= IBUS_CAP_SYNC_PROCESS_KEY_V2;
+        ibus_input_context_set_capabilities (priv->ibuscontext,
+                                             capabilities);
+        ibus_input_context_set_client_commit_preedit (priv->ibuscontext, TRUE);
+        ibus_input_context_set_preedit_format (priv->ibuscontext,
+                                               IBUS_PREEDIT_FORMAT_HINT);
+        if (_use_sync_mode == 1) {
+            ibus_input_context_set_post_process_key_event (priv->ibuscontext,
+                                                           TRUE);
+        }
+        ibus_input_context_focus_in (priv->ibuscontext);
+        ibus_wayland_im_reset_modifiers (wlim);
+        g_signal_emit (wlim,
+                       wayland_im_signals[IBUS_FOCUS_IN],
+                       0,
+                       g_dbus_proxy_get_object_path (
+                               G_DBUS_PROXY (priv->ibuscontext)));
+        ibus_input_context_set_content_type (priv->ibuscontext,
+                                             priv->ibus_purpose,
+                                             priv->ibus_hints);
+    }
+}
+
+
+static void
+input_method_activate (void                               *data,
+                       struct zwp_input_method_union      *input_method,
+                       struct zwp_input_method_context_v1 *context)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->context || priv->ibuscontext)
+        input_method_deactivate (data, input_method, context);
+
+    priv->context = context;
+    if (context)
+        priv->im_serial = 0;
+
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        zwp_input_method_context_v1_add_listener (context,
+                                                  &context_listener_v1,
+                                                  wlim);
+        priv->keyboard_v1 = zwp_input_method_context_v1_grab_keyboard (context);
+        wl_keyboard_add_listener (priv->keyboard_v1,
+                                  &keyboard_listener_v1,
+                                  wlim);
+        break;
+    case INPUT_METHOD_V2:
+        priv->seat->virtual_keyboard =
+                zwp_virtual_keyboard_manager_v1_create_virtual_keyboard (
+                        _virtual_keyboard_manager, priv->seat->seat);
+        /* Regenerating `virtual_keyboard` causes `size` = 0 in
+         * input_method_keyboard_keymap() with focus changes in Sway session.
+         */
+        priv->seat->has_compositor_keymap = FALSE;
+        priv->seat->keyboard_v2 = zwp_input_method_v2_grab_keyboard (
+                input_method->u.input_method_v2);
+        zwp_input_method_keyboard_grab_v2_add_listener (
+                priv->seat->keyboard_v2,
+                &keyboard_listener_v2,
+                wlim);
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+
+    priv->ibus_hints = IBUS_INPUT_HINT_NONE;
+    priv->ibus_purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
+
+    g_assert (!priv->ibuscontext);
+
+    priv->cancellable = g_cancellable_new ();
+    ibus_bus_create_input_context_async (priv->ibusbus,
+                                         "wayland",
+                                         -1,
+                                         priv->cancellable,
+                                         _create_input_context_done,
+                                         wlim);
+}
+
+
+static void
+input_method_deactivate (void                               *data,
+                         struct zwp_input_method_union      *input_method,
+                         struct zwp_input_method_context_v1 *context)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->cancellable) {
+        /* Cancel any ongoing create input context request.  */
+        g_cancellable_cancel (priv->cancellable);
+        g_clear_object (&priv->cancellable);
+    }
+
+
+    if (priv->ibuscontext) {
+        gchar *object_path = g_strdup (g_dbus_proxy_get_object_path (
+                G_DBUS_PROXY (priv->ibuscontext)));
+        ibus_input_context_focus_out (priv->ibuscontext);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_commit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_forward_key_event_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_update_preedit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_show_preedit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_hide_preedit_text_cb),
+                wlim);
+#ifdef ENABLE_SURROUNDING
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_delete_surrounding_text_cb),
+                wlim);
+#endif
+        g_clear_object (&priv->ibuscontext);
+
+        g_signal_emit (wlim,
+                       wayland_im_signals[IBUS_FOCUS_OUT],
+                       0,
+                       object_path);
+        g_free (object_path);
+    }
+
+    if (priv->preedit_text)
+        g_clear_object (&priv->preedit_text);
+#if ENABLE_SURROUNDING
+    if (priv->surrounding_text)
+        g_clear_object (&priv->surrounding_text);
+#endif
+
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        g_clear_pointer (&priv->keyboard_v1, wl_keyboard_destroy);
+        if (priv->context) {
+            g_clear_pointer (&priv->context,
+                             zwp_input_method_context_v1_destroy);
+        }
+        break;
+    case INPUT_METHOD_V2:
+        if (priv->seat->keyboard_v2) {
+            g_clear_pointer (&priv->seat->keyboard_v2,
+                             zwp_input_method_keyboard_grab_v2_release);
+        }
+        if (priv->seat->virtual_keyboard) {
+            g_clear_pointer (&priv->seat->virtual_keyboard,
+                             zwp_virtual_keyboard_v1_destroy);
+        }
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+
+static void
+input_method_activate_v1 (void                               *data,
+                          struct zwp_input_method_v1         *input_method_v1,
+                          struct zwp_input_method_context_v1 *context)
+{
+    struct zwp_input_method_union input_method;
+    input_method.u.input_method_v1 = input_method_v1;
+    input_method_activate (data, &input_method, context);
+}
+
+
+static void
+input_method_deactivate_v1 (void                               *data,
+                            struct zwp_input_method_v1         *input_method_v1,
+                            struct zwp_input_method_context_v1 *context)
+{
+    struct zwp_input_method_union input_method;
+    input_method.u.input_method_v1 = input_method_v1;
+    input_method_deactivate (data, &input_method, context);
+}
+
+
+static void
+input_method_activate_v2 (void                       *data,
+                          struct zwp_input_method_v2 *input_method_v2)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->seat->pending_activate = TRUE;
+}
+
+
+static void
+input_method_deactivate_v2 (void                       *data,
+                            struct zwp_input_method_v2 *input_method_v2)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->seat->pending_deactivate = TRUE;
+}
+
+
+static void
+input_method_surrounding_text_v2 (void                       *data,
+                                  struct zwp_input_method_v2 *input_method_v2,
+                                  const char                 *text,
+                                  uint32_t                    cursor,
+                                  uint32_t                    anchor)
+{
+    struct zwp_input_method_context_union context;
+    context.u.input_method_v2 = input_method_v2;
+    handle_surrounding_text (data, &context, text, cursor, anchor);
+}
+
+
+static void
+input_method_text_change_cause_v2 (void                       *data,
+                                   struct zwp_input_method_v2 *input_method_v2,
+                                   uint32_t                    cause)
+{
+}
+
+
+static void
+input_method_content_type_v2 (void                       *data,
+                              struct zwp_input_method_v2 *input_method_v2,
+                              uint32_t                    hints,
+                              uint32_t                    purpose)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    IBusInputHints ibus_hints = IBUS_INPUT_HINT_NONE;
+    IBusInputPurpose ibus_purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_COMPLETION)
+        ibus_hints |= IBUS_INPUT_HINT_WORD_COMPLETION;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_SPELLCHECK)
+        ibus_hints |= IBUS_INPUT_HINT_SPELLCHECK;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_AUTO_CAPITALIZATION)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_SENTENCES;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_LOWERCASE)
+        ibus_hints |= IBUS_INPUT_HINT_LOWERCASE;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_UPPERCASE)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_CHARS;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_TITLECASE)
+        ibus_hints |= IBUS_INPUT_HINT_UPPERCASE_WORDS;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_HIDDEN_TEXT)
+        ibus_hints |= IBUS_INPUT_HINT_HIDDEN_TEXT;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_SENSITIVE_DATA)
+        ibus_hints |= IBUS_INPUT_HINT_PRIVATE;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_LATIN)
+        ibus_hints |= IBUS_INPUT_HINT_LATIN;
+    if (hints & ZWP_TEXT_INPUT_V3_CONTENT_HINT_MULTILINE)
+        ibus_hints |= IBUS_INPUT_HINT_MULTILINE;
+
+    switch (purpose) {
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_FREE_FORM;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_ALPHA:
+        ibus_purpose = IBUS_INPUT_PURPOSE_ALPHA;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DIGITS:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DIGITS;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NUMBER:
+        ibus_purpose = IBUS_INPUT_PURPOSE_NUMBER;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PHONE:
+        ibus_purpose = IBUS_INPUT_PURPOSE_PHONE;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_URL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_URL;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_EMAIL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_EMAIL;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NAME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_NAME;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PASSWORD:
+        ibus_purpose = IBUS_INPUT_PURPOSE_PASSWORD;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_PIN:
+        ibus_purpose = IBUS_INPUT_PURPOSE_PIN;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DATE:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DATE;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TIME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_TIME;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_DATETIME:
+        ibus_purpose = IBUS_INPUT_PURPOSE_DATETIME;
+        break;
+    case ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_TERMINAL:
+        ibus_purpose = IBUS_INPUT_PURPOSE_TERMINAL;
+        break;
+    default:
+        g_warning ("Wrong purpose in the input-method context: %d", purpose);
+    }
+
+    priv->ibus_hints = ibus_hints;
+    priv->ibus_purpose = ibus_purpose;
+
+    /* Update priv->ibus_[hints|purpose] after _create_input_context_done()
+     * is called.
+     */
+    if (G_UNLIKELY (priv->ibuscontext)) {
+        ibus_input_context_set_content_type (priv->ibuscontext,
+                                             ibus_purpose,
+                                             ibus_hints);
+    }
+}
+
+
+static void
+input_method_done_v2 (void                       *data,
+                      struct zwp_input_method_v2 *input_method_v2)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    struct zwp_input_method_union input_method;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    priv->im_serial++;
+    input_method.u.input_method_v2 = input_method_v2;
+
+    /* Ghostty requires to receive the 'im_preedit_end' signal with
+     * zwp_input_method_v2_set_preedit_string() to recover the 'im_commit'
+     * signal but GtkIMContextWayland::text_input_preedit_apply() can emit
+     * the 'preedit-end' signal in case that
+     * GtkIMContextWayland->current_preedit.text is %NULL and it happens
+     * if zwp_text_input_v3_listener.done is emitted.
+     * To make sure zwp_text_input_v3_listener.done,
+     * zwp_input_method_v2_commit() is called after the im_serial is bumped.
+     */
+    if (priv->hiding_preedit_text &&
+        !priv->seat->pending_activate &&
+        priv->seat->active) {
+        zwp_input_method_v2_commit (priv->seat->input_method_v2,
+                                    priv->im_serial);
+        priv->hiding_preedit_text = FALSE;
+    }
+
+    if (priv->seat->pending_activate && !priv->seat->active) {
+        priv->seat->active = TRUE;
+        input_method_activate (data, &input_method, NULL);
+    } else if (priv->seat->pending_deactivate && priv->seat->active) {
+        priv->seat->active = FALSE;
+        input_method_deactivate (data, &input_method, NULL);
+    }
+    priv->seat->pending_activate = FALSE;
+    priv->seat->pending_deactivate = FALSE;
+}
+
+
+static void
+input_method_unavailable_v2 (void                       *data,
+                             struct zwp_input_method_v2 *input_method_v2)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    gchar *seat_name;
+    struct zwp_input_method_union input_method;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    g_assert (priv->seat);
+    seat_name = g_strdup (priv->seat->name);
+    if (!seat_name)
+        seat_name = g_strdup_printf ("wl_name:%u", priv->seat->wl_name);
+    g_warning ("%s becomes unavailable on seat \"%s\". "
+               "You might run another input method framework.",
+               priv->seat->input_method_v2 == input_method_v2 ? "Input method" :
+                       "Non-primary input method",
+               seat_name);
+    g_free (seat_name);
+
+    if (priv->seat->active) {
+        priv->seat->active = FALSE;
+        input_method.u.input_method_v2 = input_method_v2;
+        input_method_deactivate (data, &input_method, NULL);
+    }
+
+    zwp_input_method_v2_destroy (input_method_v2);
+    priv->seat->input_method_v2 = NULL;
+}
+
+
+static const struct zwp_input_method_v1_listener input_method_listener_v1 = {
+    .activate = input_method_activate_v1,
+    .deactivate = input_method_deactivate_v1
+};
+
+
+static const struct zwp_input_method_v2_listener input_method_listener_v2 = {
+    .activate = input_method_activate_v2,
+    .deactivate = input_method_deactivate_v2,
+    .surrounding_text= input_method_surrounding_text_v2,
+    .text_change_cause = input_method_text_change_cause_v2,
+    .content_type = input_method_content_type_v2,
+    .done = input_method_done_v2,
+    .unavailable = input_method_unavailable_v2
+};
+
+
+static void
+seat_handle_capabilities(void *data, struct wl_seat *wl_seat,
+                         enum wl_seat_capability caps)
+{
+}
+
+static void
+seat_handle_name(void *data, struct wl_seat *wl_seat, const char *name)
+{
+    IBusWaylandSeat *seat = data;
+    g_assert (seat);
+    g_assert (name);
+
+    g_free (seat->name);
+    seat->name = g_strdup(name);
+}
+
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_handle_capabilities,
+    .name = seat_handle_name,
+};
+
+
+static void
+registry_handle_global (void               *data,
+                        struct wl_registry *registry,
+                        uint32_t            name,
+                        const char         *interface,
+                        uint32_t            version)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->verbose) {
+        fprintf (priv->log,
+                 "wl_registry gets interface: %s name: %u version: %u\n",
+                 interface, name, version);
+        fflush (priv->log);
+    }
+    if (!g_strcmp0 (interface, zwp_input_method_manager_v2_interface.name)) {
+        priv->im_serial = 0;
+        priv->version = INPUT_METHOD_V2;
+        priv->input_method_manager_v2 =
+                wl_registry_bind (registry, name,
+                                  &zwp_input_method_manager_v2_interface, 1);
+    } else if (!g_strcmp0 (interface, zwp_input_method_v1_interface.name)) {
+        priv->im_serial = 0;
+        if (version >= 4)
+            version = 4;
+        priv->version = INPUT_METHOD_V1;
+        priv->input_method_v1 =
+                wl_registry_bind (registry, name,
+                                  &zwp_input_method_v1_interface, version);
+        zwp_input_method_v1_add_listener (priv->input_method_v1,
+                                          &input_method_listener_v1, wlim);
+    } else if (!g_strcmp0 (interface, zwp_input_panel_v1_interface.name)) {
+        priv->panel = wl_registry_bind (registry, name,
+                                        &zwp_input_panel_v1_interface, 1);
+    } else if (!g_strcmp0 (interface, wl_seat_interface.name)) {
+        IBusWaylandSeat *seat = g_slice_new0 (IBusWaylandSeat);
+        if (version >= 5)
+            version = 5;
+        seat->seat = wl_registry_bind (registry, name,
+                                       &wl_seat_interface, version);
+        seat->wl_name = name;
+        wl_seat_add_listener (seat->seat, &seat_listener, seat);
+        g_ptr_array_add (priv->seats, seat);
+        /* Assume the constructor of IBusWaylandIM is done and the second
+         * seat is called here and don't have to wait for
+         * wl_display_roundtrip().
+         */
+        if (priv->seat) {
+            seat->input_method_v2 =
+                    zwp_input_method_manager_v2_get_input_method (
+                            priv->input_method_manager_v2,
+                            seat->seat);
+            zwp_input_method_v2_add_listener (seat->input_method_v2,
+                                              &input_method_listener_v2, wlim);
+        }
+        priv->seat = seat;
+    } else if (!g_strcmp0 (interface,
+                           zwp_virtual_keyboard_manager_v1_interface.name)) {
+        _virtual_keyboard_manager =
+                wl_registry_bind (registry, name,
+                                  &zwp_virtual_keyboard_manager_v1_interface,
+                                  1);
+    }
+}
+
+
+static void
+registry_handle_global_remove (void               *data,
+                               struct wl_registry *registry,
+                               uint32_t            name)
+{
+    IBusWaylandIM *wlim = data;
+    IBusWaylandIMPrivate *priv;
+    IBusWaylandSeat *seat;
+    guint i = 0;
+
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->verbose) {
+        fprintf (priv->log, "wl_registry remove name: %u\n", name);
+        fflush (priv->log);
+    }
+    if (!(seat = _get_seat_with_name (priv->seats, name, &i)))
+        return;
+    if (priv->verbose) {
+        fprintf (priv->log, "Remove %s seat.\n", seat->name);
+        fflush (priv->log);
+    }
+    g_ptr_array_remove_index (priv->seats, i);
+    if (priv->seat == seat) {
+        if (!priv->seats->len)
+            priv->seat = NULL;
+        else
+            priv->seat = g_ptr_array_index (priv->seats, 0);
+    }
+}
+
+
+static const struct wl_registry_listener registry_listener = {
+    .global = registry_handle_global,
+    .global_remove = registry_handle_global_remove
+};
+
+
+static void
+ibus_wayland_im_class_init (IBusWaylandIMClass *class)
+{
+    GObjectClass *gobject_class = G_OBJECT_CLASS (class);
+    IBusObjectClass *ibus_object_class = IBUS_OBJECT_CLASS (class);
+
+    gobject_class->constructor = ibus_wayland_im_constructor;
+    gobject_class->set_property =
+            (GObjectSetPropertyFunc)ibus_wayland_im_set_property;
+    gobject_class->get_property =
+            (GObjectGetPropertyFunc)ibus_wayland_im_get_property;
+    ibus_object_class->destroy = ibus_wayland_im_destroy;
+
+    /* install properties */
+    /**
+     * IBusWaylandIM:bus:
+     *
+     * The #IBusBus
+     */
+    g_object_class_install_property (gobject_class,
+                    PROP_BUS,
+                    g_param_spec_object ("bus",
+                        "IBusBus",
+                        "The #IBusBus",
+                        IBUS_TYPE_BUS,
+                        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+
+    /**
+     * IBusWaylandIM:wl_display:
+     *
+     * The struct wl_display
+     */
+    g_object_class_install_property (gobject_class,
+                    PROP_DISPLAY,
+                    g_param_spec_pointer ("wl_display",
+                        "wl_display",
+                        "The struct wl_display",
+                        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+
+    /**
+     * IBusWaylandIM:log:
+     *
+     * The FILE of the logging file
+     * The default is $XDG_CACHE_HOME/wayland.log
+     */
+    g_object_class_install_property (gobject_class,
+                    PROP_LOG,
+                    g_param_spec_pointer ("log",
+                        "loggin file",
+                        "The FILE of the logging file",
+                        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+
+    /**
+     * IBusWaylandIM:verbose:
+     *
+     * The verbose logging mode
+     * %TRUE if output the logging file with verbose, otherwise %FALSE.
+     */
+    g_object_class_install_property (gobject_class,
+                    PROP_VERBOSE,
+                    g_param_spec_boolean ("verbose",
+                        "verbose mode",
+                        "The verbose logging mode",
+                        FALSE,
+                        G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+
+    /**
+     * IBusWaylandIM:use-system-keymap:
+     *
+     * Use system keymap.
+     * %TRUE if the session keymap is used forcibly instead of keymaps of the
+     * IBus XKB engines, otherwise %FALSE.
+     */
+    g_object_class_install_property (gobject_class,
+                    PROP_USE_SYS_KEYMAP,
+                    g_param_spec_boolean ("use-system-keymap",
+                        "use system keymap",
+                        "Use system keymap",
+                        FALSE,
+                        G_PARAM_READWRITE));
+
+    /* install signals */
+    /* this module can call ibus_input_context_focus_in() and the focus-in
+     * signal can reach the IBus panel and this also can call
+     * ibus_input_context_focus_out() but the focus-out signal does not reach
+     * the panel in case X11 client gets the focus because ibus-x11 calls
+     * ibus_input_context_focus_in() before this calls
+     * ibus_input_context_focus_out() and ibus-dameon ignores the double
+     * focus-out signal since the focus-out signal already happened with the
+     * focus-in signal. SO IBUS_FOCUS_OUT signal is needed at least to
+     * send the signal to the panel certainly.
+     */
+    wayland_im_signals[IBUS_FOCUS_IN] =
+        g_signal_new (I_("ibus-focus-in"),
+            G_TYPE_FROM_CLASS (class),
+            G_SIGNAL_RUN_LAST,
+            0,
+            NULL, NULL,
+            g_cclosure_marshal_VOID__STRING,
+            G_TYPE_NONE,
+            1,
+            G_TYPE_STRING);
+    g_signal_set_va_marshaller (wayland_im_signals[IBUS_FOCUS_IN],
+                                G_TYPE_FROM_CLASS (class),
+                                g_cclosure_marshal_VOID__STRINGv);
+
+    wayland_im_signals[IBUS_FOCUS_OUT] =
+        g_signal_new (I_("ibus-focus-out"),
+            G_TYPE_FROM_CLASS (class),
+            G_SIGNAL_RUN_LAST,
+            0,
+            NULL, NULL,
+            g_cclosure_marshal_VOID__STRING,
+            G_TYPE_NONE,
+            1,
+            G_TYPE_STRING);
+    g_signal_set_va_marshaller (wayland_im_signals[IBUS_FOCUS_OUT],
+                                G_TYPE_FROM_CLASS (class),
+                                g_cclosure_marshal_VOID__STRINGv);
+}
+
+
+static gboolean
+ibus_wayland_im_open_log (IBusWaylandIM *wlim)
+{
+    IBusWaylandIMPrivate *priv;
+    char *directory;
+    char *path;
+    struct timeval time_val;
+    struct tm local_time;
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    directory = g_build_filename (g_get_user_cache_dir (), "ibus", NULL);
+    g_return_val_if_fail (directory, FALSE);
+    errno = 0;
+    if (g_mkdir_with_parents (directory, 0700) != 0) {
+        g_error ("mkdir is failed in: %s: %s",
+                 directory, g_strerror (errno));
+        return FALSE;
+    }
+    path = g_build_filename (directory, "wayland.log", NULL);
+    g_free (directory);
+    if (!(priv->log = fopen (path, "w"))) {
+        g_error ("Cannot open log file: %s: %s",
+                 path, g_strerror (errno));
+        return FALSE;
+    }
+    g_free (path);
+    gettimeofday (&time_val, NULL);
+    localtime_r (&time_val.tv_sec, &local_time);
+    fprintf (priv->log, "Start %02d:%02d:%02d.%6d\n",
+             local_time.tm_hour,
+             local_time.tm_min,
+             local_time.tm_sec,
+             (int)time_val.tv_usec);
+    fflush (priv->log);
+    return TRUE;
+}
+
+
+static GObject*
+ibus_wayland_im_constructor (GType                  type,
+                             guint                  n_params,
+                             GObjectConstructParam *params)
+{
+    GObject *object;
+    IBusWaylandIM *wlim;
+    IBusWaylandIMPrivate *priv;
+    IBusWaylandSeat *seat = NULL;
+    IBusEngineDesc *desc;
+    struct xkb_keymap *keymap = NULL;
+    gboolean has_keymap = FALSE;
+
+    object = G_OBJECT_CLASS (ibus_wayland_im_parent_class)->constructor (
+            type, n_params, params);
+    /* make bus object sink */
+    g_object_ref_sink (object);
+    wlim = IBUS_WAYLAND_IM (object);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (!priv->log)
+        g_assert (ibus_wayland_im_open_log (wlim));
+    if (!priv->display)
+        priv->display = wl_display_connect (NULL);
+    if (!priv->display) {
+        g_error ("Failed to connect to Wayland server: %s\n",
+                 g_strerror (errno));
+    }
+    priv->seats = g_ptr_array_new_with_free_func (ibus_wayland_seat_destroy);
+    priv->repeat_rate = 25;
+    priv->repeat_delay = 600;
+
+    _registry = wl_display_get_registry (priv->display);
+    wl_registry_add_listener (_registry, &registry_listener, wlim);
+    wl_display_roundtrip (priv->display);
+    if (priv->input_method_manager_v2 && priv->seat &&
+        _virtual_keyboard_manager) {
+        seat = priv->seat;
+        seat->input_method_v2 = zwp_input_method_manager_v2_get_input_method (
+                priv->input_method_manager_v2,
+                seat->seat);
+        zwp_input_method_v2_add_listener (seat->input_method_v2,
+                                          &input_method_listener_v2, wlim);
+    }
+    if ((!seat || !seat->input_method_v2) && !priv->input_method_v1) {
+        g_error ("No input_method global\n");
+    }
+
+    priv->xkb_context = xkb_context_new (0);
+    if (priv->xkb_context == NULL) {
+        g_error ("Failed to create XKB context\n");
+    }
+
+    if (!priv->ibusbus || !ibus_bus_is_connected (priv->ibusbus)) {
+        g_warning ("Cannot connect to ibus-daemon");
+        g_object_unref (object);
+        return NULL;
+    }
+    desc = ibus_bus_get_global_engine (priv->ibusbus);
+    if (desc)
+        keymap = create_user_xkb_keymap (priv->xkb_context, desc);
+    if (keymap) {
+        has_keymap = ibus_xkb_keymap_update_with_keymap (&priv->key_user,
+                                                         keymap);
+        xkb_keymap_unref (keymap);
+    }
+    if (priv->verbose) {
+        if (!desc) {
+            fprintf (priv->log, "Constructor has no global engine\n");
+        } else {
+            fprintf (priv->log, "Constructor engine %s keymap:%s state:%s\n",
+                     ibus_engine_desc_get_name (desc),
+                     has_keymap ? "TRUE" : "FALSE",
+                     priv->key_user.state ? "TRUE" : "FALSE");
+        }
+        fflush (priv->log);
+    }
+    ibus_bus_set_watch_ibus_signal (priv->ibusbus, TRUE);
+    g_signal_connect (priv->ibusbus, "global-engine-changed",
+                      G_CALLBACK (_bus_global_engine_changed_cb),
+                      object);
+
+    _use_sync_mode = _get_char_env ("IBUS_ENABLE_SYNC_MODE", 1);
+
+    return object;
+}
+
+
+static void
+ibus_wayland_im_init (IBusWaylandIM *wlim)
+{
+}
+
+
+static void
+ibus_wayland_im_destroy (IBusObject *object)
+{
+    IBusWaylandIM *wlim = (IBusWaylandIM *)object;
+    IBusWaylandIMPrivate *priv;
+
+    g_debug ("IBusWaylandIM is destroyed.");
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (object));
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    if (priv->cancellable) {
+        g_cancellable_cancel (priv->cancellable);
+        g_clear_object (&priv->cancellable);
+    }
+    if (priv->ibuscontext) {
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_commit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_forward_key_event_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_update_preedit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_show_preedit_text_cb),
+                wlim);
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_hide_preedit_text_cb),
+                wlim);
+#ifdef ENABLE_SURROUNDING
+        g_signal_handlers_disconnect_by_func (
+                priv->ibuscontext,
+                G_CALLBACK (_context_delete_surrounding_text_cb),
+                wlim);
+#endif
+        g_clear_object (&priv->ibuscontext);
+    }
+    g_clear_pointer (&priv->panel_surface,
+                     zwp_input_panel_surface_v1_destroy);
+    g_clear_pointer (&priv->keyboard_v1, wl_keyboard_destroy);
+    g_clear_pointer (&priv->context, zwp_input_method_context_v1_destroy);
+    if (priv->panel)
+        g_clear_pointer (&priv->panel, zwp_input_panel_v1_destroy);
+    if (priv->input_method_v1)
+        g_clear_pointer (&priv->input_method_v1, zwp_input_method_v1_destroy);
+    if (priv->seats) {
+        g_ptr_array_free (priv->seats, TRUE);
+        priv->seats = NULL;
+    }
+    if (priv->input_method_manager_v2) {
+        g_clear_pointer (&priv->input_method_manager_v2,
+                         zwp_input_method_manager_v2_destroy);
+    }
+    g_clear_pointer (&priv->key_user.state, xkb_state_unref);
+    g_clear_pointer (&priv->key_sys.state, xkb_state_unref);
+    g_clear_pointer (&priv->key_user.keymap, xkb_keymap_unref);
+    g_clear_pointer (&priv->key_sys.keymap, xkb_keymap_unref);
+    g_clear_pointer (&priv->xkb_context, xkb_context_unref);
+    clear_keycode2sym (&priv->key_user.keycode2sym);
+    clear_keycode2sym (&priv->key_sys.keycode2sym);
+    if (priv->log) {
+        fclose (priv->log);
+        priv->log = NULL;
+    }
+    g_clear_object (&priv->preedit_text);
+#if ENABLE_SURROUNDING
+    g_clear_object (&priv->surrounding_text);
+#endif
+
+
+    IBUS_OBJECT_CLASS (ibus_wayland_im_parent_class)->destroy (object);
+}
+
+
+static void
+ibus_wayland_im_set_property (IBusWaylandIM *wlim,
+                              guint          prop_id,
+                              const GValue  *value,
+                              GParamSpec    *pspec)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (prop_id) {
+    case PROP_BUS:
+        g_assert (priv->ibusbus == NULL);
+        priv->ibusbus = g_value_get_object (value);
+        if (!IBUS_IS_BUS (priv->ibusbus)) {
+            g_warning ("bus is not IBusBus.");
+            priv->ibusbus = NULL;
+        }
+        break;
+    case PROP_DISPLAY:
+        g_assert (priv->display == NULL);
+        priv->display = g_value_get_pointer (value);
+        break;
+    case PROP_LOG:
+        g_assert (priv->log == NULL);
+        priv->log = g_value_get_pointer (value);
+        break;
+    case PROP_VERBOSE:
+        g_assert (!priv->verbose);
+        priv->verbose = g_value_get_boolean (value);
+        break;
+    case PROP_USE_SYS_KEYMAP:
+        priv->use_sys_keymap = g_value_get_boolean (value);
+        break;
+    default:
+        G_OBJECT_WARN_INVALID_PROPERTY_ID (wlim, prop_id, pspec);
+    }
+}
+
+
+static void
+ibus_wayland_im_get_property (IBusWaylandIM *wlim,
+                              guint          prop_id,
+                              GValue        *value,
+                              GParamSpec    *pspec)
+{
+    IBusWaylandIMPrivate *priv;
+    g_return_if_fail (IBUS_IS_WAYLAND_IM (wlim));
+
+    priv = ibus_wayland_im_get_instance_private (wlim);
+    switch (prop_id) {
+    case PROP_BUS:
+        g_value_set_object (value, priv->ibusbus);
+        break;
+    case PROP_DISPLAY:
+        g_value_set_pointer (value, priv->display);
+        break;
+    case PROP_LOG:
+        g_value_set_pointer (value, priv->log);
+        break;
+    case PROP_VERBOSE:
+        g_value_set_boolean (value, priv->verbose);
+        break;
+    case PROP_USE_SYS_KEYMAP:
+        g_value_set_boolean (value, priv->use_sys_keymap);
+        break;
+    default:
+        G_OBJECT_WARN_INVALID_PROPERTY_ID (wlim, prop_id, pspec);
+    }
+}
+
+
+IBusWaylandIM *
+ibus_wayland_im_new (const gchar *first_property_name, ...)
+{
+    va_list var_args;
+    GObject *object;
+
+    g_assert (first_property_name);
+
+    va_start (var_args, first_property_name);
+    object = g_object_new_valist (IBUS_TYPE_WAYLAND_IM,
+                                  first_property_name,
+                                  var_args);
+    va_end (var_args);
+
+    return IBUS_WAYLAND_IM (object);
+}
+
+gboolean
+ibus_wayland_im_set_surface (IBusWaylandIM *wlim,
+                             void          *surface)
+{
+    IBusWaylandIMPrivate *priv;
+    struct wl_surface *_surface = surface;
+
+    g_return_val_if_fail (wlim, FALSE);
+    priv = ibus_wayland_im_get_instance_private (wlim);
+
+    switch (priv->version) {
+    case INPUT_METHOD_V1:
+        if (!_surface)
+            return TRUE;
+        if (!priv->panel) {
+            g_warning ("Need zwp_input_panel_v1 before the surface setting.");
+            return FALSE;
+        }
+        priv->panel_surface =
+                zwp_input_panel_v1_get_input_panel_surface (priv->panel,
+                                                            _surface);
+        g_return_val_if_fail (priv->panel_surface, FALSE);
+        zwp_input_panel_surface_v1_set_overlay_panel (priv->panel_surface);
+        break;
+    case INPUT_METHOD_V2:
+        if (!priv->seat || !priv->seat->input_method_v2) {
+            g_warning ("Need zwp_input_method_v2 before the surface setting.");
+            return FALSE;
+        }
+        if (priv->seat->input_popup_surface) {
+            g_clear_pointer (&priv->seat->input_popup_surface,
+                             zwp_input_popup_surface_v2_destroy);
+        }
+        if (!_surface)
+            return TRUE;
+        priv->seat->input_popup_surface =
+                zwp_input_method_v2_get_input_popup_surface (
+                        priv->seat->input_method_v2,
+                        _surface);
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+    return TRUE;
+}

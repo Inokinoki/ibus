@@ -1,0 +1,6 @@
+<gresources>
+  <gresource prefix='/org/freedesktop/ibus'>
+    <file alias="compose/sequences">compose/sequences-@ENDIAN@-endian</file>
+  </gresource>
+</gresources>
+

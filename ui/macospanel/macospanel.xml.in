@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- filename: macospanel.xml -->
+<component>
+	<name>org.freedesktop.IBus.Panel</name>
+	<description>Panel Component on macOS</description>
+	<exec>@libexecdir@/ibus-ui-macos</exec>
+	<version>@VERSION@</version>
+	<author>Weixuan XIAO &lt;veyx.shaw@gmail.com&gt;</author>
+	<license>LGPL</license>
+	<homepage>https://github.com/ibus/ibus/wiki</homepage>
+	<textdomain>ibus</textdomain>
+</component>

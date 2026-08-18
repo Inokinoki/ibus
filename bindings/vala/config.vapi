@@ -10,4 +10,6 @@ namespace Config
     public const string LIBEXECDIR;
     public const string GETTEXT_PACKAGE;
     public const string LOCALEDIR;
+    public const string UI_WAYLAND_DESKTOP;
+
 }

@@ -4,8 +4,8 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2016 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2010-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
-# Copyright (c) 2007-2016 Red Hat, Inc.
+# Copyright (c) 2010-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+# Copyright (c) 2007-2025 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -29,6 +29,7 @@ import os
 import signal
 import sys
 import time
+import glob
 
 from gi import require_version as gi_require_version
 gi_require_version('GLib', '2.0')
@@ -196,6 +197,79 @@ class Setup(object):
                                    'sensitive',
                                    Gio.SettingsBindFlags.GET)
 
+        # custom theme
+        self.__model_custom_theme = self.__builder.get_object(
+                "model_custom_theme")
+        self.__combobox_custom_theme = self.__builder.get_object(
+                "combobox_custom_theme")
+        self.__checkbutton_custom_theme = self.__builder.get_object(
+                "checkbutton_custom_theme")
+
+        def update_combobox_custom_theme(settings, key):
+            theme_name_list = self.__init_available_gtk_themes()
+            self.__model_custom_theme.clear()
+            for name in theme_name_list:
+                self.__model_custom_theme.append([name])
+            current_theme = self.__settings_panel.get_string(key)
+            try:
+                current_theme_number = theme_name_list.index(current_theme)
+            except ValueError:
+                self.__settings_panel.reset(key)
+                current_theme = self.__settings_panel.get_string(key)
+                current_theme_number = theme_name_list.index(current_theme)
+            self.__combobox_custom_theme.set_active(current_theme_number)
+
+        update_combobox_custom_theme(None, 'custom-theme')
+        self.__settings_panel.bind('use-custom-theme',
+                                   self.__checkbutton_custom_theme,
+                                   'active',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__settings_panel.connect('changed::custom-theme',
+                                   update_combobox_custom_theme)
+        self.__settings_panel.bind('use-custom-theme',
+                                   self.__combobox_custom_theme,
+                                   'sensitive',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__combobox_custom_theme.connect("changed",
+                                   self.__on_combobox_custom_theme_changed)
+
+
+        # custom icon
+        self.__model_custom_icon = self.__builder.get_object(
+                "model_custom_icon")
+        self.__combobox_custom_icon = self.__builder.get_object(
+                "combobox_custom_icon")
+        self.__checkbutton_custom_icon = self.__builder.get_object(
+                "checkbutton_custom_icon")
+
+        def update_combobox_custom_icon(settings, key):
+            icon_name_list = self.__init_available_gtk_icons()
+            self.__model_custom_icon.clear()
+            for name in icon_name_list:
+                self.__model_custom_icon.append([name])
+            current_icon = self.__settings_panel.get_string(key)
+            try:
+                current_icon_number = icon_name_list.index(current_icon)
+            except ValueError:
+                self.__settings_panel.reset(key)
+                current_icon = self.__settings_panel.get_string(key)
+                current_icon_number = icon_name_list.index(current_icon)
+            self.__combobox_custom_icon.set_active(current_icon_number)
+
+        update_combobox_custom_icon(None, 'custom-icon')
+        self.__settings_panel.bind('use-custom-icon',
+                                   self.__checkbutton_custom_icon,
+                                   'active',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__settings_panel.connect('changed::custom-icon',
+                                   update_combobox_custom_icon)
+        self.__settings_panel.bind('use-custom-icon',
+                                   self.__combobox_custom_icon,
+                                   'sensitive',
+                                   Gio.SettingsBindFlags.DEFAULT)
+        self.__combobox_custom_icon.connect("changed",
+                                   self.__on_combobox_custom_icon_changed)
+
         # show icon on system tray
         self.__checkbutton_show_icon_on_systray = self.__builder.get_object(
                 "checkbutton_show_icon_on_systray")
@@ -209,6 +283,13 @@ class Setup(object):
                 "checkbutton_show_im_name")
         self.__settings_panel.bind('show-im-name',
                                    self.__checkbutton_show_im_name,
+                                   'active',
+                                   Gio.SettingsBindFlags.DEFAULT)
+
+        self.__checkbutton_glyph_from_engine_lang = self.__builder.get_object(
+                "checkbutton_use_glyph_from_engine_lang")
+        self.__settings_panel.bind('use-glyph-from-engine-lang',
+                                   self.__checkbutton_glyph_from_engine_lang,
                                    'active',
                                    Gio.SettingsBindFlags.DEFAULT)
 
@@ -398,13 +479,6 @@ class Setup(object):
         self.__button_close = self.__builder.get_object("button_close")
         self.__button_close.connect("clicked", Gtk.main_quit)
 
-        # auto start ibus
-        self.__checkbutton_auto_start = self.__builder.get_object(
-                "checkbutton_auto_start")
-        self.__checkbutton_auto_start.set_active(self.__is_auto_start())
-        self.__checkbutton_auto_start.connect("toggled",
-                self.__checkbutton_auto_start_toggled_cb)
-
         self.__init_hotkeys()
         self.__init_panel()
         self.__init_general()
@@ -528,13 +602,22 @@ class Setup(object):
         GLib.timeout_add_seconds(timeout, lambda *args: main_loop.quit())
         self.__bus.connect("connected", lambda *args: main_loop.quit())
 
-        os.spawnlp(os.P_NOWAIT, "ibus-daemon", "ibus-daemon", "--xim")
+        os.spawnlp(os.P_NOWAIT, "ibus", "ibus", "start", "--xim", "--daemonize")
 
         main_loop.run()
 
         if self.__bus.is_connected():
-            message = _("IBus has been started! "
-                "If you cannot use IBus, add the following lines to your $HOME/.bashrc; then relog into your desktop.\n"
+            message = _("IBus has been started. "
+                "If you cannot use IBus, add the following lines to your "
+                "$HOME/.bashrc; then relog into your desktop.\n"
+                "\n"
+                "  # For Wayland sessions ($XDG_SESSION_TYPE is \"wayland\")\n"
+                "  export GTK_IM_MODULE=wayland\n"
+                "  export XMODIFIERS=@im=ibus\n"
+                "  export QT_IM_MODULES=wayland;ibus\n"
+                "  export QT_IM_MODULE=ibus\n"
+                "\n"
+                "  # For X11 sessions ($XDG_SESSION_TYPE is \"x11\")\n"
                 "  export GTK_IM_MODULE=ibus\n"
                 "  export XMODIFIERS=@im=ibus\n"
                 "  export QT_IM_MODULE=ibus"
@@ -547,7 +630,7 @@ class Setup(object):
             self.__flush_gtk_events()
         else:
             # Translators: %d == 5 currently
-            message = _("IBus daemon could not be started in %d seconds")
+            message = _("IBus daemon could not be started in %d seconds.")
             dlg = Gtk.MessageDialog(message_type = Gtk.MessageType.INFO,
                                     buttons = Gtk.ButtonsType.OK,
                                     text = message % timeout)
@@ -587,6 +670,63 @@ class Setup(object):
         tooltip += "\n" + \
             _("Use shortcut with shift to switch to the previous input method") 
         entry.set_tooltip_text(tooltip)
+
+    def __init_available_gtk_themes(self):
+        path_list = []
+        path_list.append(os.path.join(GLib.get_home_dir(), ".themes"))
+        path_list.append(os.path.join(GLib.get_user_data_dir(), "themes"))
+        path_list.extend(list(map(lambda x: os.path.join(
+            x, "themes"), GLib.get_system_data_dirs())))
+        theme_name_list = []
+        gtk_theme_path = []
+        for path in path_list:
+            gtk_theme_path.extend(glob.glob(path + "/*/gtk-*/gtk.css"))
+        for path in gtk_theme_path:
+            theme_name_list.append(os.path.basename(
+                os.path.dirname(os.path.dirname(path))))
+
+        theme_name_list.extend([
+            'Adwaita', 'HighContrast', 'HighContrastInverse'
+        ])
+        theme_name_list = list(set(theme_name_list))
+        theme_name_list.sort()
+
+        return theme_name_list
+
+    def __on_combobox_custom_theme_changed(self, combobox):
+        tree_iter = self.__combobox_custom_theme.get_active_iter()
+        if tree_iter is not None:
+            model = self.__combobox_custom_theme.get_model()
+            theme_name = model[tree_iter][0]
+            self.__settings_panel.set_string('custom-theme', theme_name)
+
+    def __init_available_gtk_icons(self):
+        path_list = []
+        path_list.append(os.path.join(GLib.get_home_dir(), ".icons"))
+        path_list.append(os.path.join(GLib.get_user_data_dir(), "icons"))
+        path_list.extend(list(map(lambda x: os.path.join(
+            x, "icons"), GLib.get_system_data_dirs())))
+        icon_name_list = []
+        gtk_icon_path = []
+        for path in path_list:
+            gtk_icon_path.extend(glob.glob(path + "/*/index.theme"))
+        for path in gtk_icon_path:
+            dir = os.path.dirname(path)
+            if not os.path.exists(os.path.join(dir, "cursors")):
+                icon_name_list.append(os.path.basename(dir))
+
+        icon_name_list.extend(["Adwaita"])
+        icon_name_list = list(set(icon_name_list))
+        icon_name_list.sort()
+
+        return icon_name_list
+
+    def __on_combobox_custom_icon_changed(self, combobox):
+        tree_iter = self.__combobox_custom_icon.get_active_iter()
+        if tree_iter is not None:
+            model = self.__combobox_custom_icon.get_model()
+            icon_name = model[tree_iter][0]
+            self.__settings_panel.set_string('custom-icon', icon_name)
 
     def __item_started_column_toggled_cb(self, cell, path_str, model):
 
@@ -646,37 +786,6 @@ class Setup(object):
 
         # set new value
         model.set(iter, COLUMN_PRELOAD, data[DATA_PRELOAD])
-
-    def __is_auto_start(self):
-        link_file = path.join(GLib.get_user_config_dir(),
-                              "autostart/ibus.desktop")
-        ibus_desktop = path.join(os.getenv("IBUS_PREFIX"),
-                                 "share/applications/ibus.desktop")
-
-        if not path.exists(link_file):
-            return False
-        if not path.islink(link_file):
-            return False
-        if path.realpath(link_file) != ibus_desktop:
-            return False
-        return True
-
-    def __checkbutton_auto_start_toggled_cb(self, button):
-        auto_start_dir = path.join(GLib.get_user_config_dir(), "autostart")
-        if not path.isdir(auto_start_dir):
-            os.makedirs(auto_start_dir)
-
-        link_file = path.join(GLib.get_user_config_dir(),
-                              "autostart/ibus.desktop")
-        ibus_desktop = path.join(os.getenv("IBUS_PREFIX"),
-                                 "share/applications/ibus.desktop")
-        # unlink file
-        try:
-            os.unlink(link_file)
-        except:
-            pass
-        if self.__checkbutton_auto_start.get_active():
-            os.symlink(ibus_desktop, link_file)
 
     def __sigusr1_cb(self, *args):
         self.__window.present()

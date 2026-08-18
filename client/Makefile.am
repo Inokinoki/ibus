@@ -3,7 +3,7 @@
 # ibus - The Input Bus
 #
 # Copyright (c) 2007-2010 Peng Huang <shawn.p.huang@gmail.com>
-# Copyright (c) 2007-2010 Red Hat, Inc.
+# Copyright (c) 2007-2020 Red Hat, Inc.
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -28,6 +28,10 @@ if ENABLE_GTK3
 GTK3 = gtk3
 endif
 
+if ENABLE_GTK4
+GTK4 = gtk4
+endif
+
 if ENABLE_XIM
 X11 = x11
 endif
@@ -36,11 +40,17 @@ if ENABLE_WAYLAND
 WAYLAND = wayland
 endif
 
+if ENABLE_MACOS
+MACOS = macos
+endif
+
 SUBDIRS = \
 	$(GTK2) \
 	$(GTK3) \
+	$(GTK4) \
 	$(X11) \
 	$(WAYLAND) \
+	$(MACOS) \
 	$(NULL)
 
 -include $(top_srcdir)/git.mk

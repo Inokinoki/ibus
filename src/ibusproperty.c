@@ -371,19 +371,35 @@ ibus_property_serialize (IBusProperty    *prop,
 
     g_variant_builder_add (builder, "s", prop->priv->key);
     g_variant_builder_add (builder, "u", prop->priv->type);
-    g_variant_builder_add (builder, "v",
-            ibus_serializable_serialize ((IBusSerializable *)prop->priv->label));
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
+            ibus_serializable_serialize (
+            (IBusSerializable *)prop->priv->label));
+    g_variant_builder_close (builder);
     g_variant_builder_add (builder, "s", prop->priv->icon);
-    g_variant_builder_add (builder, "v",
-            ibus_serializable_serialize ((IBusSerializable *)prop->priv->tooltip));
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
+            ibus_serializable_serialize (
+            (IBusSerializable *)prop->priv->tooltip));
+    g_variant_builder_close (builder);
     g_variant_builder_add (builder, "b", prop->priv->sensitive);
     g_variant_builder_add (builder, "b", prop->priv->visible);
     g_variant_builder_add (builder, "u", prop->priv->state);
-    g_variant_builder_add (builder, "v",
-            ibus_serializable_serialize ((IBusSerializable *)prop->priv->sub_props));
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
+            ibus_serializable_serialize (
+            (IBusSerializable *)prop->priv->sub_props));
+    g_variant_builder_close (builder);
     /* Keep the serialized order for the compatibility when add new members. */
-    g_variant_builder_add (builder, "v",
-            ibus_serializable_serialize ((IBusSerializable *)prop->priv->symbol));
+    g_variant_builder_open (builder, G_VARIANT_TYPE_VARIANT);
+    g_variant_builder_add_value (
+            builder,
+            ibus_serializable_serialize (
+            (IBusSerializable *)prop->priv->symbol));
+    g_variant_builder_close (builder);
 
     return TRUE;
 }
@@ -401,7 +417,7 @@ ibus_property_deserialize (IBusProperty *prop,
     g_variant_get_child (variant, retval++, "u", &prop->priv->type);
 
     GVariant *subvar = g_variant_get_child_value (variant, retval++);
-    if (prop->priv->label != NULL) {
+    if (prop->priv->label) {
         g_object_unref (prop->priv->label);
     }
     prop->priv->label = IBUS_TEXT (ibus_serializable_deserialize (subvar));
@@ -411,7 +427,7 @@ ibus_property_deserialize (IBusProperty *prop,
     ibus_g_variant_get_child_string (variant, retval++, &prop->priv->icon);
 
     subvar = g_variant_get_child_value (variant, retval++);
-    if (prop->priv->tooltip != NULL) {
+    if (prop->priv->tooltip) {
         g_object_unref (prop->priv->tooltip);
     }
     prop->priv->tooltip = IBUS_TEXT (ibus_serializable_deserialize (subvar));
@@ -432,7 +448,7 @@ ibus_property_deserialize (IBusProperty *prop,
 
     /* Keep the serialized order for the compatibility when add new members. */
     subvar = g_variant_get_child_value (variant, retval++);
-    if (prop->priv->symbol != NULL) {
+    if (prop->priv->symbol) {
         g_object_unref (prop->priv->symbol);
     }
     prop->priv->symbol = IBUS_TEXT (ibus_serializable_deserialize (subvar));
@@ -572,8 +588,10 @@ ibus_property_set_label (IBusProperty *prop,
         prop->priv->label = ibus_text_new_from_static_string ("");
     }
     else {
-        prop->priv->label = g_object_ref_sink (label);
+        prop->priv->label = label;
     }
+
+    g_object_ref_sink (prop->priv->label);
 }
 
 void
@@ -591,8 +609,10 @@ ibus_property_set_symbol (IBusProperty *prop,
         prop->priv->symbol = ibus_text_new_from_static_string ("");
     }
     else {
-        prop->priv->symbol = g_object_ref_sink (symbol);
+        prop->priv->symbol = symbol;
     }
+
+    g_object_ref_sink (prop->priv->symbol);
 }
 
 void
@@ -612,20 +632,18 @@ ibus_property_set_tooltip (IBusProperty *prop,
     g_assert (IBUS_IS_PROPERTY (prop));
     g_assert (tooltip == NULL || IBUS_IS_TEXT (tooltip));
 
-    IBusPropertyPrivate *priv = prop->priv;
-
-    if (priv->tooltip) {
-        g_object_unref (priv->tooltip);
+    if (prop->priv->tooltip) {
+        g_object_unref (prop->priv->tooltip);
     }
 
     if (tooltip == NULL) {
-        priv->tooltip = ibus_text_new_from_static_string ("");
-        g_object_ref_sink (priv->tooltip);
+        prop->priv->tooltip = ibus_text_new_from_static_string ("");
     }
     else {
-        priv->tooltip = tooltip;
-        g_object_ref_sink (priv->tooltip);
+        prop->priv->tooltip = tooltip;
     }
+
+    g_object_ref_sink (prop->priv->tooltip);
 }
 
 void

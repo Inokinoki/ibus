@@ -2,8 +2,8 @@
 /* vim:set et sts=4: */
 /* ibus - The Input Bus
  * Copyright (C) 2008-2013 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2013-2018 Takao Fujiwara <takao.fujiwara1@gmail.com>
- * Copyright (C) 2008-2018 Red Hat, Inc.
+ * Copyright (C) 2013-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright (C) 2008-2023 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -37,6 +37,10 @@
 #include <sys/prctl.h>
 #endif
 
+#ifdef G_OS_UNIX
+#include <glib-unix.h>
+#endif
+
 #include "global.h"
 #include "ibusimpl.h"
 #include "server.h"
@@ -52,9 +56,11 @@ static gchar *config = "default";
 static gchar *desktop = "gnome";
 
 static gchar *panel_extension_disable_users[] = {
-    "gdm",
     "gnome-initial-setup",
     "liveuser"
+};
+static gchar *panel_extension_disable_groups[] = {
+    "gdm",
 };
 
 static void
@@ -166,19 +172,29 @@ daemon (gint nochdir, gint noclose)
 #endif
 
 #ifdef HAVE_SYS_PRCTL_H
-static void
-_sig_usr1_handler (int sig)
+static gboolean
+_on_sigusr1 (void)
 {
     g_warning ("The parent process died.");
     bus_server_quit (FALSE);
+    return G_SOURCE_REMOVE;
 }
 #endif
+
+static inline void
+exit_and_free_context (int             status,
+                       GOptionContext *context)
+{
+    g_option_context_free (context);
+    exit (status);
+}
 
 gint
 main (gint argc, gchar **argv)
 {
     int i;
     const gchar *username = ibus_get_user_name ();
+    const gchar *groupname = ibus_get_group_name ();
 
     setlocale (LC_ALL, "");
 
@@ -190,11 +206,11 @@ main (gint argc, gchar **argv)
     if (!g_option_context_parse (context, &argc, &argv, &error)) {
         g_printerr ("Option parsing failed: %s\n", error->message);
 	g_error_free (error);
-        exit (-1);
+        exit_and_free_context (EXIT_FAILURE, context);
     }
     if (g_gdbus_timeout < -1) {
         g_printerr ("Bad timeout (must be >= -1): %d\n", g_gdbus_timeout);
-        exit (-1);
+        exit_and_free_context (EXIT_FAILURE, context);
     }
 
     if (g_mempro) {
@@ -206,8 +222,9 @@ main (gint argc, gchar **argv)
         struct passwd *pwd = getpwuid (getuid ());
 
         if (pwd == NULL || g_strcmp0 (pwd->pw_name, username) != 0) {
-            g_printerr ("Please run ibus-daemon with login user! Do not run ibus-daemon with sudo or su.\n");
-            exit (-1);
+            g_printerr ("Please run ibus-daemon with login user! Do not run "
+                        "ibus-daemon with sudo or su.\n");
+            exit_and_free_context (EXIT_FAILURE, context);
         }
     }
 
@@ -215,14 +232,20 @@ main (gint argc, gchar **argv)
     if (daemonize) {
         if (daemon (1, 0) != 0) {
             g_printerr ("Cannot daemonize ibus.\n");
-            exit (-1);
+            exit_and_free_context (EXIT_FAILURE, context);
         }
     }
 
-    /* create a new process group. this is important to kill all of its children by SIGTERM at a time in bus_ibus_impl_destroy. */
+    /* create a new process group. this is important to kill all of its
+     * children by SIGTERM at a time in bus_ibus_impl_destroy.
+     */
     setpgid (0, 0);
 
     ibus_init ();
+
+#ifndef HAVE_PRODUCT_BUILD
+    g_setenv ("PYTHONWARNINGS", "always", FALSE);
+#endif
 
     ibus_set_log_handler (g_verbose);
 
@@ -233,7 +256,7 @@ main (gint argc, gchar **argv)
         if (ibus_bus_is_connected (bus)) {
             if (!replace) {
                 g_printerr ("current session already has an ibus-daemon.\n");
-                exit (-1);
+                exit_and_free_context (EXIT_FAILURE, context);
             }
             ibus_bus_exit (bus, FALSE);
             while (ibus_bus_is_connected (bus)) {
@@ -244,8 +267,14 @@ main (gint argc, gchar **argv)
     }
 
     bus_server_init ();
-    for (i = 0; i < G_N_ELEMENTS(panel_extension_disable_users); i++) {
+    for (i = 0; i < G_N_ELEMENTS (panel_extension_disable_users); i++) {
         if (!g_strcmp0 (username, panel_extension_disable_users[i]) != 0) {
+            emoji_extension = "disable";
+            break;
+        }
+    }
+    for (i = 0; i < G_N_ELEMENTS (panel_extension_disable_groups); i++) {
+        if (g_strcmp0 (groupname, panel_extension_disable_groups[i]) == 0) {
             emoji_extension = "disable";
             break;
         }
@@ -259,13 +288,15 @@ main (gint argc, gchar **argv)
             if (component) {
                 bus_component_set_restart (component, restart);
             }
-            if (component == NULL || !bus_component_start (component, g_verbose)) {
+            if (component == NULL ||
+                !bus_component_start (component, g_verbose)) {
                 g_printerr ("Can not execute default config program\n");
-                exit (-1);
+                exit_and_free_context (EXIT_FAILURE, context);
             }
-        } else if (g_strcmp0 (config, "disable") != 0 && g_strcmp0 (config, "") != 0) {
+        } else if (g_strcmp0 (config, "disable") != 0 &&
+                   g_strcmp0 (config, "") != 0) {
             if (!execute_cmdline (config))
-                exit (-1);
+                exit_and_free_context (EXIT_FAILURE, context);
         }
 
         /* execute panel component */
@@ -276,13 +307,15 @@ main (gint argc, gchar **argv)
             if (component) {
                 bus_component_set_restart (component, restart);
             }
-            if (component == NULL || !bus_component_start (component, g_verbose)) {
+            if (component == NULL ||
+                !bus_component_start (component, g_verbose)) {
                 g_printerr ("Can not execute default panel program\n");
-                exit (-1);
+                exit_and_free_context (EXIT_FAILURE, context);
             }
-        } else if (g_strcmp0 (panel, "disable") != 0 && g_strcmp0 (panel, "") != 0) {
+        } else if (g_strcmp0 (panel, "disable") != 0 &&
+                   g_strcmp0 (panel, "") != 0) {
             if (!execute_cmdline (panel))
-                exit (-1);
+                exit_and_free_context (EXIT_FAILURE, context);
         }
     }
 
@@ -297,27 +330,28 @@ main (gint argc, gchar **argv)
         if (component != NULL &&
             !bus_component_start (component, g_verbose)) {
             g_printerr ("Can not execute default panel program\n");
-            exit (-1);
+            exit_and_free_context (EXIT_FAILURE, context);
         }
     } else if (g_strcmp0 (emoji_extension, "disable") != 0 &&
                g_strcmp0 (emoji_extension, "") != 0) {
         if (!execute_cmdline (emoji_extension))
-            exit (-1);
+            exit_and_free_context (EXIT_FAILURE, context);
     }
 #endif
 
     /* execute ibus xim server */
     if (xim) {
         if (!execute_cmdline (LIBEXECDIR "/ibus-x11 --kill-daemon"))
-            exit (-1);
+            exit_and_free_context (EXIT_FAILURE, context);
     }
 
     if (!daemonize) {
         if (getppid () == 1) {
             g_warning ("The parent process died.");
-            exit (0);
+            exit_and_free_context (EXIT_SUCCESS, context);
         }
 #ifdef HAVE_SYS_PRCTL_H
+#ifdef G_OS_UNIX
        /* Currently ibus-x11 detects XIOError and assume the error as the
         * desktop session is closed and ibus-x11 calls Exit D-Bus method to
         * exit ibus-daemon. But a few desktop sessions cause XError before
@@ -350,9 +384,11 @@ main (gint argc, gchar **argv)
         if (prctl (PR_SET_PDEATHSIG, SIGUSR1))
             g_printerr ("Cannot bind SIGUSR1 for parent death\n");
         else
-            signal (SIGUSR1, _sig_usr1_handler);
+            g_unix_signal_add (SIGUSR1, (GSourceFunc)_on_sigusr1, NULL);
+#endif
 #endif
     }
     bus_server_run ();
+    g_option_context_free (context);
     return 0;
 }

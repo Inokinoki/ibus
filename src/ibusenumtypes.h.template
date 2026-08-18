@@ -9,23 +9,23 @@ G_BEGIN_DECLS
 
 /*** BEGIN file-production ***/
 
-/* enumerations from "@filename@" */
+/* enumerations from "@basename@" */
 /*** END file-production ***/
 
 /*** BEGIN value-header ***/
 /**
  * @enum_name@_get_type:
- * @returns: GType of @ENUMPREFIX@@ENUMSHORT@
+ * @returns: GType of @ENUMPREFIX@_TYPE_@ENUMSHORT@
  *
- * Returns the type of @ENUMPREFIX@@ENUMSHORT@ as GType.
+ * Returns the type of @ENUMPREFIX@_TYPE_@ENUMSHORT@ as GType.
  */
 GType @enum_name@_get_type (void) G_GNUC_CONST;
 
 /**
  * @ENUMPREFIX@_TYPE_@ENUMSHORT@:
- * @returns: GType of @ENUMPREFIX@@ENUMSHORT@
+ * @returns: GType of @ENUMPREFIX@_TYPE_@ENUMSHORT@
  *
- * Returns the type of @ENUMPREFIX@@ENUMSHORT@ as GType.
+ * Returns the type of @ENUMPREFIX@_TYPE_@ENUMSHORT@ as GType.
  */
 #define @ENUMPREFIX@_TYPE_@ENUMSHORT@ (@enum_name@_get_type ())
 /*** END value-header ***/

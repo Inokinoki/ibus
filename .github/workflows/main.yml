@@ -1,0 +1,294 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ["fedora:43", "fedora:44", "ubuntu:jammy", "ubuntu:resolute"]
+    steps:
+      - name: Check container sha tags
+        run: |
+          docker pull "${{ matrix.container }}"
+          docker inspect "${{ matrix.container }}" --format=${{ '{{.RepoDigests}}{{.Created}}' }}
+
+
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            build: BUILD_MESON
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '-Dwayland=disabled'
+            build: BUILD_MESON
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '-Dappindicator=false'
+            build: BUILD_MESON
+          - container: fedora:44
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '-Ddistro-tests=true'
+            build: BUILD_MESON
+            latest_xkb: KEEP_XKB_XML
+          - container: ubuntu:resolute
+            ucd_dir: /usr/share/unicode
+            build: BUILD_MESON
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            build: BUILD_AUTOTOOL
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '--disable-wayland'
+            build: BUILD_AUTOTOOL
+          - container: fedora:43
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '--disable-appindicator'
+            build: BUILD_AUTOTOOL
+          - container: fedora:44
+            ucd_dir: /usr/share/unicode/ucd
+            test_config: '--enable-distro-tests'
+            build: BUILD_AUTOTOOL
+            latest_xkb: KEEP_XKB_XML
+          - container: ubuntu:jammy
+            ucd_dir: /usr/share/unicode
+            build: BUILD_AUTOTOOL
+          - container: ubuntu:resolute
+            ucd_dir: /usr/share/unicode
+            build: BUILD_AUTOTOOL
+
+    container:
+      image: ${{ matrix.container }}
+
+    env:
+      BUILD_AUTOTOOL: 0
+      BUILD_MESON: 1
+
+    steps:
+      - name: Install distro packages
+        env:
+         # For autogen.sh
+         UBUNTU_PACKAGES_AUTOGEN: >
+           autopoint
+           strace
+         UBUNTU_PACKAGES_MESON: >
+           meson
+           python3-minimal
+           sed
+         # For make from
+         # https://packages.ubuntu.com/search?searchon=sourcenames&keywords=ibus
+         UBUNTU_PACKAGES_BUILD: >
+           desktop-file-utils
+           dbus-x11
+           gobject-introspection
+           gtk-doc-tools
+           iso-codes
+           libdconf-dev
+           libdbusmenu-gtk3-dev
+           libgirepository1.0-dev
+           libglib2.0-dev
+           libgtk-3-bin
+           libgtk-3-dev
+           libgtk-4-dev
+           libgtk2.0-dev
+           libnotify-dev
+           libtool
+           libwayland-dev
+           python-gi-dev
+           python-is-python3
+           python3-all
+           systemd
+           unicode-cldr-core
+           unicode-data
+           valac
+           valac-0.56-vapi
+           wayland-protocols
+           wget
+         UBUNTU_PACKAGES_BUILD_NEW: >
+           systemd-dev
+         # for ibus-keypress
+         UBUNTU_PACKAGES_CI_KEY: >
+           gir1.2-gnomedesktop-4.0
+           libevdev-dev
+           libudev-dev
+         FEDORA_PACKAGES_BUILD: >
+           cldr-emoji-annotation
+           dbus-glib-devel
+           dbus-python-devel
+           dbus-x11
+           dconf-devel
+           desktop-file-utils
+           gettext-devel
+           git
+           gtk-doc
+           gtk2-devel
+           gtk3-devel
+           gtk4-devel
+           iso-codes-devel
+           libdbusmenu-gtk3-devel
+           libnotify-devel
+           libtool
+           python3-devel
+           python3-gobject-devel
+           systemd
+           unicode-emoji
+           unicode-ucd
+           vala
+           wayland-devel
+           wayland-protocols-devel
+         FEDORA_PACKAGES_MESON: >
+           meson
+         # for gtkdoc-fixxref
+         FEDORA_PACKAGES_GTKDOC: >
+           glib2-doc
+         # for ibus-keypress
+         FEDORA_PACKAGES_CI_KEY: >
+           gnome-shell
+           gnome-shell-extension-no-overview
+           gnome-desktop4
+           libevdev-devel
+           systemd-devel
+         # for gcc -fanalyzer -fsanitize=address -fsanitize=leak options
+         # xkeyboard-config-devel to make ibus/engine/simle.xml.in
+         FEDORA_PACKAGES_DISTRO: >
+           libasan
+           xkeyboard-config-devel
+           patch
+           strace
+
+        run: |
+          case "${{ matrix.container }}" in
+          ubuntu*)
+            cat /etc/lsb-release
+            echo "apt-get update -qq -y"
+            apt-get update -qq -y
+            echo "apt-get install -q -y git"
+            apt-get install -q -y git
+            PACKAGES=$(echo "$UBUNTU_PACKAGES_AUTOGEN" | tr -d '\n')
+            PACKAGES=$(echo "$PACKAGES $UBUNTU_PACKAGES_BUILD" | tr -d '\n')
+            PACKAGES=$(echo "$PACKAGES $UBUNTU_PACKAGES_CI_KEY" | tr -d '\n')
+            if test "${{ matrix.container }}" != "ubuntu:jammy"; then
+              PACKAGES=$(echo "$PACKAGES $UBUNTU_PACKAGES_BUILD_NEW" | tr -d '\n')
+            fi
+            if test $${{ matrix.build }} -eq $BUILD_MESON; then
+              PACKAGES=$(echo "$PACKAGES $UBUNTU_PACKAGES_MESON" | tr -d '\n')
+            fi
+            echo "apt-get install -y $PACKAGES"
+            apt-get install -y $PACKAGES
+            dpkg -l | grep unicode-data
+            ;;
+          fedora*)
+            cat /etc/fedora-release
+            DNF=dnf
+            echo "$DNF -y update"
+            $DNF -y update
+            echo "$DNF -y install git which"
+            $DNF -y install git which
+            PACKAGES=$(echo "$FEDORA_PACKAGES_BUILD" | tr -d '\n')
+            PACKAGES=$(echo "$PACKAGES $FEDORA_PACKAGES_GTKDOC" | tr -d '\n')
+            PACKAGES=$(echo "$PACKAGES $FEDORA_PACKAGES_CI_KEY" | tr -d '\n')
+            PACKAGES=$(echo "$PACKAGES $FEDORA_PACKAGES_DISTRO" | tr -d '\n')
+            if test $${{ matrix.build }} -eq $BUILD_MESON; then
+              PACKAGES=$(echo "$PACKAGES $FEDORA_PACKAGES_MESON" | tr -d '\n')
+            fi
+            echo "$DNF -y install $PACKAGES"
+            $DNF -y install $PACKAGES
+            rpm -q gnome-shell
+            V=$(rpm -q gnome-shell | sed -e 's/gnome-shell-\([0-9]*\)[.-~].*/\1/')
+            grep $V /usr/share/gnome-shell/extensions/no-overview@fthx/metadata.json
+            ;;
+          *)
+            echo "Not supported ${{ matrix.container }}"
+            ls /etc/*release
+            cat /etc/*release
+            exit 1
+            ;;
+          esac
+          pwd
+          echo $GITHUB_WORKSPACE
+          ls -a
+
+      - uses: actions/checkout@v4
+        with:
+          #repository: ibus/ibus
+          fetch-depth: 200
+
+      - name: Fetch git tags
+        run: |
+          pwd
+          id
+          ls -al
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+          git branch
+          git fetch --prune --unshallow --tags
+          echo $PATH
+
+      - name: Run autogen
+        # configure options from
+        # https://salsa.debian.org/debian/ibus/-/blob/master/debian/rules
+        run: >
+          if ! ls /usr/share/vala-*/vapi/wayland-client.vapi;
+          then
+          cp .github/workflows/wayland-client.v0.56.vapi
+          bindings/vala/wayland-client.vapi;
+          fi;
+          export SAVE_DIST_FILES=1;
+          if test $${{ matrix.build }} -eq $BUILD_MESON;
+          then
+          meson setup builddir
+          -Ducd-dir=${{ matrix.ucd_dir }}
+          -Dtests-exclude-suites=ibus:display
+          -Dinstall-tests=true
+          ${{ matrix.test_config }};
+          else
+          ./autogen.sh
+          --enable-gtk-doc
+          --with-python=/usr/bin/python3
+          --with-ucd-dir=${{ matrix.ucd_dir }}
+          --enable-install-tests
+          ${{ matrix.test_config }};
+          TEST_KEEP_XKB_XML=1;
+          TEST_=0;
+          test $TEST_${{ matrix.latest_xkb }} -ne 1 &&
+          make -C engine maintainer-clean-generic || :;
+          fi;
+
+      - name: Run make
+        # Set the cutom DESTDIR because the default DESTDIR
+        # /home/travis/bulid/fujiwarat/$PKG/ibus/ibus-$VERSION/_inst seems to
+        # be too long and failed to set DESTDIR to install
+        # bindings/pygobject/IBus.py
+        run: >
+          export DISABLE_DAEMONIZE_IN_TESTS=1;
+          if test $${{ matrix.build }} -eq $BUILD_MESON;
+          then
+          meson dist -C builddir;
+          else
+          make -j$(nproc) distcheck
+          DISTCHECK_CONFIGURE_FLAGS="
+          --enable-gtk-doc
+          --disable-schemas-install
+          --enable-memconf
+          --with-python=/usr/bin/python3
+          --with-ucd-dir=${{ matrix.ucd_dir }}
+          --enable-install-tests
+          ${{ matrix.test_config }}
+          "
+          DISABLE_GUI_TESTS="
+          ibus-compose ibus-keypress test-stress xkb-latin-layouts
+          "
+          VERBOSE=1
+          DESTDIR="$HOME/build/$USER/dest";
+          fi;
+

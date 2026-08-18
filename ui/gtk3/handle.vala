@@ -3,7 +3,7 @@
  * ibus - The Input Bus
  *
  * Copyright(c) 2011-2016 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright(c) 2016-2017 Takao Fujiwara <takao.fujiwara1@gmail.com>
+ * Copyright(c) 2016-2025 Takao Fujiwara <takao.fujiwara1@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -62,12 +62,19 @@ class Handle : Gtk.EventBox {
     }
 
     public override bool button_press_event(Gdk.EventButton event) {
+#if ENABLE_XIM
+        if (!BindingCommon.default_is_xdisplay())
+            return false;
         if (event.button != 1)
             return false;
         m_workarea = Gdk.Rectangle(){
             x = 0, y = 0, width = int.MAX, height = int.MAX};
         do {
-            Gdk.Window root = Gdk.get_default_root_window();
+            var display = BindingCommon.get_xdisplay();
+            if (display == null)
+                break;
+            var screen = display.get_default_screen();
+            Gdk.Window root = screen.get_root_window();
             Gdk.Atom property = Gdk.Atom.intern("_NET_CURRENT_DESKTOP", false);
             Gdk.Atom type = Gdk.Atom.intern("CARDINAL", false);
             Gdk.Atom actual_type;
@@ -129,19 +136,28 @@ class Handle : Gtk.EventBox {
         m_press_pos.y = (int)event.y_root - y;
         move_begin();
         return true;
+#else
+        return false;
+#endif
     }
 
     public override bool button_release_event(Gdk.EventButton event) {
+#if ENABLE_XIM
         if (event.button != 1)
             return false;
         m_move_begined = false;
         m_press_pos.x = 0;
         m_press_pos.y = 0;
+#if 0
         get_window().set_cursor(new Gdk.Cursor.for_display(
-                   Gdk.Display.get_default(),
+                   get_display(),
                    Gdk.CursorType.FLEUR));
+#endif
         move_end();
         return true;
+#else
+        return false;
+#endif
     }
 
     public override bool motion_notify_event(Gdk.EventMotion event) {

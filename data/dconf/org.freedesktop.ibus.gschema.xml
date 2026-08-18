@@ -28,7 +28,55 @@
       <description>The saved version number will be used to check the difference between the version of the previous installed ibus and one of the current ibus.</description>
     </key>
     <key name="xkb-latin-layouts" type="as">
-      <default>[ 'ara', 'bg', 'cz', 'dev', 'gr', 'gur', 'in', 'jp(kana)', 'mal', 'mkd', 'ru', 'ua' ]</default>
+      <default>
+        [ 'af', 'af(fa-olpc)', 'af(ps-olpc)', 'af(ps)', 'af(uz)',
+        'af(uz-olpc)', 'am', 'am(eastern)', 'am(eastern-alt)',
+        'am(phonetic)', 'am(phonetic-alt)', 'am(western)', 'ara',
+        'ara(azerty)', 'ara(azerty_digits)', 'ara(buckwalter)',
+        'ara(digits)', 'ara(qwerty)', 'ara(qwerty_digits)',
+        'az(cyrillic)', 'bd', 'bd(probhat)', 'bg', 'bg(bas_phonetic)',
+        'bg(phonetic)', 'brai', 'brai(left_hand)', 'brai(right_hand)',
+        'bt', 'by', 'by(phonetic)', 'by(legacy)', 'ca(ike)',
+        'cn(tib)', 'cn(tib_asciinum)', 'cn(ug)', 'cz', 'cz(ucw)',
+        'de(ru)', 'dev', 'et', 'fr(geo)', 'ge', 'ge(os)', 'gr',
+        'gr(extended)', 'gr(nodeadkeys)', 'gr(polytonic)',
+        'gr(simple)', 'gur', 'il', 'il(biblical)', 'il(lyx)',
+        'il(phonetic)', 'id(melayu-phonetic)', 'id(melayu-phoneticx)',
+        'id(pegon-phonetic)',
+        'in', 'in(ben)', 'in(ben_baishakhi)', 'in(ben_bornona)',
+        'in(ben_gitanjali)', 'in(ben_inscript)', 'in(ben_probhat)',
+        'in(bolnagri)', 'in(deva)', 'in(guj)', 'in(guj-kagapa)',
+        'in(guru)', 'in(hin-kagapa)', 'in(hin-wx)', 'in(jhelum)',
+        'in(kan)', 'in(kan-kagapa)', 'in(mal)', 'in(mal_enhanced)',
+        'in(mal_lalitha)', 'in(mar-kagapa)', 'in(ori)',
+        'in(san-kagapa)', 'in(tam)', 'in(tamilnet)',
+        'in(tamilnet_TAB)', 'in(tamilnet_TSCII)',
+        'in(tamilnet_tamilnumbers)', 'in(tam_tamilnumbers)',
+        'in(tel)', 'in(tel-kagapa)',
+        'in(urd-phonetic)', 'in(urd-phonetic3)', 'in(urd-winkeys)',
+        'iq', 'ir', 'ir(azb)', 'ir(pes_keypad)', 'jp(kana)', 'jp(mac)', 'kg',
+        'kg(phonetic)', 'kh', 'kz', 'kz(kazrus)', 'kz(ruskaz)', 'la',
+        'la(stea)', 'lk', 'lk(tam_TAB)', 'lk(tam_unicode)', 'lv(modern-cyr)',
+        'ma', 'ma(tifinagh)', 'ma(tifinagh-alt)',
+        'ma(tifinagh-alt-phonetic)', 'ma(tifinagh-extended)',
+        'ma(tifinagh-extended-phonetic)', 'ma(tifinagh-phonetic)',
+        'me(cyrillic)', 'me(cyrillicalternatequotes)',
+        'me(cyrillicyz)', 'mk', 'mk(nodeadkeys)', 'mm', 'mn', 'mv',
+        'np', 'ph(capewell-dvorak-bay)', 'ph(capewell-qwerf2k6-bay)',
+        'ph(colemak-bay)', 'ph(dvorak-bay)', 'ph(qwerty-bay)', 'pk',
+        'pk(ara)', 'pk(snd)', 'pk(urd-crulp)', 'pk(urd-nla)',
+        'pl(ru_phonetic_dvorak)', 'rs', 'rs(alternatequotes)',
+        'rs(rue)', 'rs(yz)', 'ru', 'ru(bak)', 'ru(chm)', 'ru(cv)',
+        'ru(dos)', 'ru(kom)', 'ru(legacy)', 'ru(mac)',
+        'ru(os_legacy)', 'ru(os_winkeys)', 'ru(phonetic)',
+        'ru(phonetic_winkeys)', 'ru(sah)', 'ru(srp)', 'ru(tt)',
+        'ru(typewriter)', 'ru(typewriter-legacy)', 'ru(udm)',
+        'ru(xal)', 'se(rus)', 'se(swl)', 'sy',
+        'sy(syc)', 'sy(syc_phonetic)', 'th', 'th(pat)', 'th(tis)',
+        'tj', 'tj(legacy)', 'tz', 'ua', 'ua(homophonic)',
+        'ua(legacy)', 'ua(phonetic)', 'ua(typewriter)', 'ua(winkeys)',
+        'us(chr)', 'us(rus)', 'uz' ]
+      </default>
       <summary>Latin layouts which have no ASCII</summary>
       <description>US layout is appended to the Latin layouts. variant can be omitted.</description>
     </key>
@@ -146,7 +194,7 @@
       <description>Show input method name on language bar</description>
     </key>
     <key name="xkb-icon-rgba" type="s">
-      <default>'#415099'</default>
+      <default>'#51a2da'</default>
       <summary>RGBA value of XKB icon</summary>
       <description>XKB icon shows the layout string and the string is rendered with the RGBA value. The RGBA value can be 1. a color name from X11, 2. a hex value in form '#rrggbb' where 'r', 'g' and 'b' are hex digits of the red, green, and blue, 3. a RGB color in form 'rgb(r,g,b)' or 4. a RGBA color in form 'rgba(r,g,b,a)' where 'r', 'g', and 'b' are either integers in the range 0 to 255 or percentage values in the range 0% to 100%, and 'a' is a floating point value in the range 0 to 1 of the alpha.</description>
     </key>
@@ -165,6 +213,35 @@
       <summary>Custom font</summary>
       <description>Custom font name for language panel</description>
     </key>
+    <key name="use-custom-theme" type="b">
+      <default>false</default>
+      <summary>Use custom theme</summary>
+      <description>Use custom theme name for language panel</description>
+    </key>
+    <key name="custom-theme" type="s">
+      <default>'Adwaita'</default>
+      <summary>Custom theme</summary>
+      <description>Custom theme name for language panel</description>
+    </key>
+    <key name="use-custom-icon" type="b">
+      <default>false</default>
+      <summary>Use custom icon</summary>
+      <description>Use custom icon name for arrow buttons on candidate window</description>
+    </key>
+    <key name="custom-icon" type="s">
+      <default>'Adwaita'</default>
+      <summary>Custom icon</summary>
+      <description>Custom icon name for arrow buttons on candidate window</description>
+    </key>
+    <key name="use-glyph-from-engine-lang" type="b">
+      <default>true</default>
+      <summary>Choose glyphs with input method's language on candidate window</summary>
+      <description>Some code points have different glyphs and Pango
+                   determines the glyphs from the language attribute.
+                   Pango chooses glyphs from the IBus engine's language
+                   if the value is true and chooses them from the desktop
+                   locale if the value is false.</description>
+    </key>
     <child name="emoji" schema="org.freedesktop.ibus.panel.emoji"/>
   </schema>
   <schema id="org.freedesktop.ibus.panel.emoji" path="/desktop/ibus/panel/emoji/">
@@ -174,7 +251,7 @@
       <description>The shortcut keys for turning Unicode typing on or off</description>
     </key>
     <key name="hotkey" type="as">
-      <default>[ '&lt;Control&gt;&lt;Shift&gt;e' ]</default>
+      <default>[ '&lt;Super&gt;period', '&lt;Super&gt;semicolon' ]</default>
       <summary>Emoji shortcut keys for gtk_accelerator_parse</summary>
       <description>The shortcut keys for turning emoji typing on or off</description>
     </key>
@@ -186,7 +263,7 @@
     <key name="lang" type="s">
       <default>'en'</default>
       <summary>Default language for emoji dictionary</summary>
-      <description>Choose a default language of emoji dictionaries on the emoji dialog. The value $lang is applied to /usr/share/ibus/dicts/emoji-$lang.dict</description>
+      <description>Choose a default language of emoji dictionaries on the emoji dialog. The value $lang is applied to /usr/share/ibus/dicts/emoji-$lang.dict .</description>
     </key>
     <key name="favorites" type="as">
       <default>[]</default>

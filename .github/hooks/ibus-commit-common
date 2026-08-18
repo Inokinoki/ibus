@@ -1,0 +1,166 @@
+#!/bin/sh
+# vim:set et sts=4 sw=4:
+# -*- coding: utf-8 -*-
+#
+# ibus - The Input Bus
+#
+# Copyright (c) 2023 Takao Fujiwara <takao.fujiwara1@gmail.com>
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+# USA
+
+# You can copy this file to .git/hooks/commit-msg with the file permission
+# '0755'.
+# This script is useful not to commit invalid commit IDs every time and
+# leave a temporary version(1.5.00) in source files when a release is
+# bumped.
+
+REPO="ibus/ibus"
+TMP_VER="1.5.00"
+GRV='`'
+DLL='$'
+BSH='\'
+CONJCTN=':.~'
+# $DELIM cannot be file path or URI
+DELIM=";[]{}()%&<>+,=|${GRV}"
+EX_APIS="ibus|gtk|gdk|gsk|glib|g_|gnome|^qt|kde|plasma|freedesktop|xorg|x11"
+EX_APIS="${EX_APIS}|xkb|wayland|^wl|zwp|java|jdk|pango|cairo|^hb|iso|vapi"
+EX_APIS="${EX_APIS}|dbus|appindicator|sql|guint|gint|gboolean|gchar|gdouble"
+EX_APIS="${EX_APIS}|^lv|bksl|libdbusmenu"
+DISTROS="redhat|suse|linux|unix|bsd|microsoft|openoffice|mozilla|google"
+DISTROS="$DISTROS|unicode|intel|amd"
+PLATFORMS="fedora|centos|ubuntu|windows|firefox|chrome|rhbz"
+TOOLS="autoconf|aclocal|libtool|keymap|keysym|keycode|pointerkey|gzip|xev"
+TOOLS="$TOOLS|d-bus|emojier"
+ACRONYMS="i18n|l10n|m17n|a11y"
+
+echo -e "\033[37;1mIBus commit-msg\033[0m"
+
+
+check_if_hook_is_latest()
+{
+    eval ORIG_FILE=\"$(basename "$0")\"
+    CONFIG_FILE="$GIT_DIR/hooks/ibus-commit-config"
+    test -f  "$CONFIG_FILE" && . "$CONFIG_FILE" || \
+        echo >&2 "WARNING: No $CONFIG_FILE for GITHUB_DIR parameter"
+    test "x$GITHUB_DIR" = "x" && \
+        eval GITHUB_DIR=\"$(dirname "$GIT_DIR")/.github/hooks\" || :
+    diff "$GITHUB_DIR/$ORIG_FILE" "$GIT_DIR/hooks/$ORIG_FILE" || {
+        echo >&2 ""
+        echo >&2 "ERROR: $0 is older than $GITHUB_DIR/$ORIG_FILE"
+        exit 1
+    }
+    eval IBUS_FILE=\"$(basename "$1")\"
+    diff "$GITHUB_DIR/$IBUS_FILE" "$GIT_DIR/hooks/$IBUS_FILE" || {
+        echo >&2 ""
+        echo >&2 "ERROR: $1 is older than $GITHUB_DIR/$IBUS_FILE"
+        exit 1
+    }
+}
+
+check_signed_off_by()
+{
+    test "" = "$(cat </dev/stdin |
+        grep '^Signed-off-by: ' |
+        sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+        echo >&2 Duplicate Signed-off-by lines.
+        exit 1
+    }
+}
+
+check_commit_id()
+{
+    ID=$1
+    case "$ID" in
+    # Ignore old invalid IDs.
+    38ba099) return;;
+    39b6907) return;;
+    7bbcce6) return;;
+    esac
+    # Check files in the current branch only but not cached commits
+    git log --pretty=oneline | grep -q "$ID" || {
+        echo >&2 "Invalid commit ID: $ID"
+        exit 1
+    }
+}
+
+check_commit_id_from_stdin()
+{
+    for ID in $(cat < /dev/stdin | grep '^Fixes: ' | awk '{print $2}')
+    do
+        echo "$ID" | grep -q "^#" || {
+            echo "$ID" | grep -q "^http" && {
+                echo $ID | grep -q "$REPO/commit/" && {
+                    ID=$(basename $ID)
+                    check_commit_id $ID
+                } || :
+            } || {
+                check_commit_id $ID
+            }
+        }
+    done
+}
+
+check_tmp_version()
+{
+    cat < /dev/stdin | sed -e "s?Subject: \[PATCH\] \(Release .*\)?\1?" |\
+        grep -q '^Release ' && {
+        FILES=$(grep "Since: $TMP_VER" $(git ls-files))
+        if test x"$FILES" != x ; then
+            echo >&2 "You need to replace $TMP_VER with the releasing version"
+            echo >&2 "$FILES"
+            exit 1
+        fi
+    } || :
+}
+
+spell_checking()
+{
+    MISSPELLINGS=""
+    while read word; do
+        word="$(echo "$word" | tr -d "\n")"
+        word="$(echo "$word" | sed -e 's/^[-*?]*//')"
+        test x"$word" != x"" || continue
+        # Spell check
+        (look $word > /dev/null) && continue || :
+        # Source file path check
+        (grep -q "$word" <(find . -depth)) && continue || :
+        # System file path check
+        test -f "$word" && continue || :
+        # Variable check
+        (echo "$word" | grep -q "$BSH$DLL") && continue || :
+        MISSPELLINGS="$MISSPELLINGS $word"
+    done << EOF_ENVS_INTERNAL
+    `cat </dev/stdin | grep -v "^#" | grep -vi "^fixes: " |\
+      tr "$DELIM" " " | tr " 	" "\n" |\
+     grep -Ev "http:|https:|ftp:|rdp:|nfs:|smb:|file:" | grep -Eiv "$EX_APIS" |\
+     grep -Eiv "$DISTROS" | grep -Eiv "$PLATFORMS" | grep -Eiv "$TOOLS" |\
+     grep -Eiv "$ACRONYMS" |\
+     tr "$CONJCTN" "\n"`
+EOF_ENVS_INTERNAL
+    # Pull words for the spell checking with the following steps:
+    # 1. Ignore comment line with "^#"
+    # 2. Replace delimiters with space char to pull words
+    # 3. Replace space or Tab with "\n" for do-while
+    # 4. Ignore URI
+    # 5. Ignore APIs
+    # 6. Ignore distributions
+    # 7. Ignore platforms, tools, acronyms
+    # 8. Replace conjunctions with "\n"
+    MISSPELLINGS="$(expr "$MISSPELLINGS" : ' \(.*\)')"
+    test x"$MISSPELLINGS" = x"" || {
+        echo "WARNING: Possible spelling errors \"$MISSPELLINGS\""
+    }
+}

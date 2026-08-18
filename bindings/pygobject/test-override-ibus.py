@@ -20,17 +20,18 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
 # USA
 
-import unittest
-
-import os
 import sys
+import unittest
+from pathlib import Path
 
 # move the script path at the end, so the necessary modules in system
 # pygobject can be loaded first
-tests_builddir = os.path.abspath(os.path.dirname(__file__))
-sys.path = [path for path in sys.path if path != tests_builddir]
-sys.path.append(tests_builddir)
+tests_builddir = Path(__file__).resolve().parent
+sys.path = [path for path in sys.path if Path(path) != tests_builddir]
+sys.path.append(str(tests_builddir))
 
+import gi
+gi.require_versions({'GLib': '2.0', 'IBus': '1.0'})
 from gi.repository import GLib, IBus
 
 class TestOverride(unittest.TestCase):

@@ -1,0 +1,55 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    name: meson (macos)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew update
+          brew install meson ninja pkg-config glib gettext iso-codes dbus vala json-glib gobject-introspection
+          brew list meson ninja pkg-config glib gettext iso-codes dbus vala json-glib gobject-introspection
+
+      - name: Configure
+        run: |
+          export PATH="$(brew --prefix)/opt/gettext/bin:$PATH"
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix)/opt/gettext/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          meson setup build \
+            -Dgtk2=disabled \
+            -Dgtk3=false \
+            -Dgtk4=false \
+            -Dxim=disabled \
+            -Dwayland=disabled \
+            -Dui=false \
+            -Dsetup=false \
+            -Dengine=false \
+            -Dappindicator=false \
+            -Dlibnotify=false \
+            -Demoji-dict=false \
+            -Dunicode-dict=false \
+            -Dgtk-doc=false \
+            -Dsystemd-services=disabled \
+            -Dtests=false \
+            -Ddconf=disabled
+
+      - name: Compile
+        run: meson compile -C build -v
+
+      - name: Show macOS targets
+        run: |
+          ninja -C build -t targets | grep -Ei 'macos|ibus-ui-macos|ibus-macos|libibus' || true
+          test -x build/client/macos/ibus-macos
+          test -x build/ui/macospanel/ibus-ui-macos
+          test -x build/bus/ibus-daemon
+          test -f build/src/libibus-1.0.5.dylib
+          ls -la build/client/macos/ibus-macos \
+                 build/ui/macospanel/ibus-ui-macos \
+                 build/bus/ibus-daemon \
+                 build/src/libibus-1.0.5.dylib

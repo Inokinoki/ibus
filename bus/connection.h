@@ -2,7 +2,7 @@
 /* vim:set et sts=4: */
 /* bus - The Input Bus
  * Copyright (C) 2008-2010 Peng Huang <shawn.p.huang@gmail.com>
- * Copyright (C) 2008-2010 Red Hat, Inc.
+ * Copyright (C) 2008-2024 Red Hat, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -41,6 +41,9 @@
     (G_TYPE_CHECK_CLASS_TYPE ((klass), BUS_TYPE_CONNECTION))
 #define BUS_CONNECTION_GET_CLASS(obj)   \
     (G_TYPE_INSTANCE_GET_CLASS ((obj), BUS_TYPE_CONNECTION, BusConnectionClass))
+
+/* bus_dbus_impl_hello() sets the client unique names ":1.1" or later. */
+#define IBUS_NAME_OWNER_NAME ":1.0"
 
 G_BEGIN_DECLS
 
