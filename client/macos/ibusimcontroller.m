@@ -45,8 +45,8 @@ ibus_macos_set_bus (IBusBus *bus)
     _bus = bus ? g_object_ref (bus) : NULL;
 }
 
-@interface IBusIMController ()
-{
+@interface IBusIMController () {
+    @public
     IBusInputContext *_context;
     id                _client;
     gboolean          _preedit_visible;
