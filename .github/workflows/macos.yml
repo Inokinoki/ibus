@@ -29,6 +29,7 @@ jobs:
             -Dwayland=disabled \
             -Dui=false \
             -Dsetup=false \
+            -Dengine=false \
             -Dappindicator=false \
             -Dlibnotify=false \
             -Demoji-dict=false \
@@ -44,4 +45,11 @@ jobs:
       - name: Show macOS targets
         run: |
           meson compile -C build --list | grep -Ei 'macos|ibus-ui-macos|ibus-macos|libibus' || true
-          ls -la build/client/macos build/ui/macospanel build/src build/bus 2>/dev/null || true
+          test -x build/client/macos/ibus-macos
+          test -x build/ui/macospanel/ibus-ui-macos
+          test -x build/bus/ibus-daemon
+          test -f build/src/libibus-1.0.5.dylib
+          ls -la build/client/macos/ibus-macos \
+                 build/ui/macospanel/ibus-ui-macos \
+                 build/bus/ibus-daemon \
+                 build/src/libibus-1.0.5.dylib

@@ -388,7 +388,13 @@ subdir('client')
 subdir('portal')
 subdir('data')
 subdir('po')
-if get_option('engine')
+# ibus-engine-simple is generated from X11 xkeyboard-config (evdev.xml).
+enable_engine = get_option('engine')
+if enable_engine and is_darwin
+  warning('Skipping IBus simple engine on macOS (requires X11 evdev.xml)')
+  enable_engine = false
+endif
+if enable_engine
   subdir('engine')
 endif
 if (get_option('ui') and enable_gtk3) or enable_macos_ui
@@ -445,7 +451,7 @@ summary({
   'Build vala binding':            true,
   'Build document':                get_option('gtk-doc'),
   'Build UI':                      get_option('ui'),
-  'Build engine':                  get_option('engine'),
+  'Build engine':                  enable_engine,
   'Enable key snooper':            get_option('snooper'),
   'No snooper regexes':            get_option('no-snooper-apps'),
   'Enable libnotify':              enable_libnotify,
