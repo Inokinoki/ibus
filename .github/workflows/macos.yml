@@ -44,7 +44,7 @@ jobs:
 
       - name: Show macOS targets
         run: |
-          meson compile -C build --list | grep -Ei 'macos|ibus-ui-macos|ibus-macos|libibus' || true
+          ninja -C build -t targets | grep -Ei 'macos|ibus-ui-macos|ibus-macos|libibus' || true
           test -x build/client/macos/ibus-macos
           test -x build/ui/macospanel/ibus-ui-macos
           test -x build/bus/ibus-daemon
